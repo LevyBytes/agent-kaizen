@@ -1,0 +1,130 @@
+# Local VS Code workspace/bootstrap artifacts
+_workspace/
+open-*-vscode.cmd
+
+# Node tooling (Prettier) and npm/yarn/pnpm. Kept LOCAL/private (not shipped) so this private
+# dev config does not add non-essential files to the public AGPL repo.
+node_modules/
+package.json
+package-lock.json
+.prettierignore
+.prettierrc*
+.prettiercache
+.npm/
+.yarn/
+.pnp.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Rust / Cargo build artifacts (no Rust in-repo yet; proactive)
+target/
+*.rlib
+# Cargo.lock  # ignore for libraries; keep tracked for binaries
+
+# Other build/output directories
+out/
+.gradle/
+vendor/
+
+# Local agent/editor state (keep .claude local). Shipped skills are EXTERNAL — `.agents/skills` and
+# `.claude/skills` are real folders holding a TRACKED master INDEX.md plus per-skill directory junctions
+# into the sibling SKILLS store ($DEVROOT/SKILLS/skills). Ignore the junctions; track INDEX.md in both mirrors. See skill-drafting's README.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/INDEX.md
+.agents/skills/*
+!.agents/skills/INDEX.md
+.codex/
+
+# Local source/bootstrap stub not intended for public repo
+src/
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.pyright/
+.hypothesis/
+.tox/
+.nox/
+.eggs/
+__pypackages__/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment/config files
+.env*
+*.local
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Secrets, credentials, and private key material
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+id_rsa*
+id_ed25519*
+*.kdbx
+*.age
+*.gpg
+*.asc
+
+# Private binary documents, archives, and local databases
+*.pdf
+*.doc
+*.docx
+*.xls
+*.xlsx
+*.ppt
+*.pptx
+*.zip
+*.7z
+*.rar
+*.sqlite
+*.sqlite3
+*.db
+
+# Editor/OS clutter
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Keep public documentation assets trackable
+!docs/
+!docs/images/
+!docs/images/README.png

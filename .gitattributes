@@ -1,0 +1,22 @@
+# Deterministic, cross-platform line endings. Text is normalized to LF in the repo
+# (matches the Prettier eol=lf setting) regardless of contributor OS or core.autocrlf.
+* text=auto eol=lf
+
+# Binary assets must never be eol-normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Windows-only scripts keep CRLF so they run correctly when checked out on Windows.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

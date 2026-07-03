@@ -1,0 +1,10 @@
+# OPT-IN heavy extra: in-process embeddings + semantic chunking via sentence-transformers.
+# This is NEVER referenced by requirements-kaizen.txt (the dependency-light core stays stdlib +
+# pyturso). Install it on its own, into a venv, only if you want in-process embeddings:
+#
+#     pip install -r requirements-pytorch.txt
+#
+# torch is platform/GPU-specific. For CUDA, install the matching torch wheel from pytorch.org FIRST
+# (see setup/PYTORCH.md), then run this file (sentence-transformers will reuse the installed torch).
+# Redirect the multi-GB HuggingFace weight cache out of the repo via HF_HOME (see setup/PYTORCH.md).
+sentence-transformers>=3.0,<4.0

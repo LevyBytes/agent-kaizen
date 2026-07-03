@@ -1,0 +1,11 @@
+*
+!.gitignore
+!README.md
+!plans/
+!prompts-given/
+!prompt-results-logs/
+!user-generated-prompts/
+!plans/.gitignore
+!prompts-given/.gitignore
+!prompt-results-logs/.gitignore
+!user-generated-prompts/.gitignore

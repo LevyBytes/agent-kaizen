@@ -1,0 +1,2 @@
+pyturso==0.6.1
+typing-extensions==4.15.0

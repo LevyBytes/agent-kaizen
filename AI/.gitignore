@@ -1,0 +1,15 @@
+*
+!.gitignore
+!generation/
+!work/
+!support_scripts_work/
+# AI-generated harness tests are tracked (AI/tests) -- only .py/.md, never .pyc caches.
+!tests/
+!tests/**/
+!tests/**/*.py
+!tests/**/*.md
+!generation/.gitignore
+!work/.gitignore
+!support_scripts_work/.gitignore
+# AI/vc is a local-only staging area for skill content (verbatim third-party docs + scratch).
+# It stays on disk but is never tracked or published — the `*` rule above ignores it.

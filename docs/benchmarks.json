@@ -1,0 +1,207 @@
+{
+  "schema": "kaizen-bench/v1",
+  "generated_at": "2026-07-03T23:15:29+00:00",
+  "mode": "full",
+  "machine": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 198 Stepping 2, GenuineIntel",
+    "python": "3.12.10",
+    "pyturso": "0.6.1",
+    "kaizen_tool_version": "0.1.0"
+  },
+  "config": {
+    "write_iterations": 50,
+    "warmup": 3,
+    "scales": [
+      100,
+      1000,
+      5000
+    ],
+    "digest_iterations": 20,
+    "corpus_docs": 20,
+    "paragraphs_per_doc": 40,
+    "query_repeats": 5,
+    "top_k": 5
+  },
+  "write_ops": {
+    "W1": {
+      "alias": "task-start",
+      "n": 50,
+      "median_ms": 24.25,
+      "p95_ms": 27.15,
+      "min_ms": 22.09,
+      "max_ms": 27.98
+    },
+    "G1": {
+      "alias": "gotcha-add",
+      "n": 50,
+      "median_ms": 25.7,
+      "p95_ms": 27.29,
+      "min_ms": 23.57,
+      "max_ms": 28.18
+    },
+    "Q2": {
+      "alias": "verification-add",
+      "n": 50,
+      "median_ms": 13.82,
+      "p95_ms": 15.54,
+      "min_ms": 12.35,
+      "max_ms": 20.02
+    },
+    "X1": {
+      "alias": "policy-add",
+      "n": 50,
+      "median_ms": 14.12,
+      "p95_ms": 16.14,
+      "min_ms": 12.77,
+      "max_ms": 16.25
+    },
+    "T2": {
+      "alias": "score-add",
+      "n": 50,
+      "median_ms": 14.74,
+      "p95_ms": 16.42,
+      "min_ms": 13.68,
+      "max_ms": 17.82
+    }
+  },
+  "digest_at_scale": [
+    {
+      "scale": 100,
+      "R0": {
+        "n": 20,
+        "median_ms": 80.78,
+        "p95_ms": 84.55,
+        "min_ms": 78.95,
+        "max_ms": 87.49
+      },
+      "counts": {
+        "policies_active": 10,
+        "gotchas_active": 30,
+        "blocking_verifications": 20,
+        "learned_total": 0,
+        "tasks_active": 30,
+        "active_tasks_without_ledger": 30,
+        "ledger_events_last_7d": 60,
+        "verifications_last_7d": 20
+      },
+      "r0_payload_bytes": 5265,
+      "X5": {
+        "n": 20,
+        "median_ms": 6.7,
+        "p95_ms": 7.26,
+        "min_ms": 6.5,
+        "max_ms": 7.3
+      }
+    },
+    {
+      "scale": 1000,
+      "R0": {
+        "n": 20,
+        "median_ms": 213.28,
+        "p95_ms": 231.47,
+        "min_ms": 203.98,
+        "max_ms": 238.32
+      },
+      "counts": {
+        "policies_active": 100,
+        "gotchas_active": 300,
+        "blocking_verifications": 200,
+        "learned_total": 0,
+        "tasks_active": 300,
+        "active_tasks_without_ledger": 300,
+        "ledger_events_last_7d": 600,
+        "verifications_last_7d": 200
+      },
+      "r0_payload_bytes": 7263,
+      "X5": {
+        "n": 20,
+        "median_ms": 18.46,
+        "p95_ms": 21.49,
+        "min_ms": 17.23,
+        "max_ms": 45.46
+      }
+    },
+    {
+      "scale": 5000,
+      "R0": {
+        "n": 20,
+        "median_ms": 105.79,
+        "p95_ms": 117.69,
+        "min_ms": 101.81,
+        "max_ms": 144.23
+      },
+      "counts": {
+        "policies_active": 500,
+        "gotchas_active": 1500,
+        "blocking_verifications": 1000,
+        "learned_total": 0,
+        "tasks_active": 1500,
+        "active_tasks_without_ledger": 1500,
+        "ledger_events_last_7d": 3000,
+        "verifications_last_7d": 1000
+      },
+      "r0_payload_bytes": 7299,
+      "X5": {
+        "n": 20,
+        "median_ms": 8.5,
+        "p95_ms": 9.2,
+        "min_ms": 7.92,
+        "max_ms": 9.92
+      }
+    }
+  ],
+  "retrieval": {
+    "mode": "like",
+    "E1": {
+      "alias": "evidence-ingest-file",
+      "n": 20,
+      "median_ms": 24.56,
+      "p95_ms": 30.46,
+      "min_ms": 18.37,
+      "max_ms": 31.31
+    },
+    "E3": {
+      "alias": "evidence-chunk",
+      "n": 20,
+      "median_ms": 43.5,
+      "p95_ms": 58.21,
+      "min_ms": 26.55,
+      "max_ms": 58.86,
+      "chunks_total": 378
+    },
+    "E4": {
+      "alias": "evidence-query",
+      "n": 100,
+      "median_ms": 14.37,
+      "p95_ms": 16.42,
+      "min_ms": 12.96,
+      "max_ms": 22.03
+    },
+    "hit_rate": {
+      "top_1": 1.0,
+      "top_5": 1.0,
+      "queries": 20,
+      "negative_control_clean": true
+    },
+    "semantic": {
+      "skipped": true,
+      "reason": "DENIED_BACKEND_UNCONFIGURED"
+    }
+  },
+  "context_recovery": {
+    "r0_scale": 5000,
+    "r0_payload_bytes": 7299,
+    "r0_tokens_approx": 1825,
+    "transcripts": {
+      "found": true,
+      "count": 20,
+      "median_raw_bytes": 1827352,
+      "median_session_text_chars": 206232,
+      "median_session_text_tokens_approx": 51558
+    },
+    "ratio_vs_transcript_text": 28
+  },
+  "total_seconds": 359.9
+}
