@@ -92,6 +92,38 @@ def get_embedding_backend() -> Optional[EmbeddingBackend]:
     )
 
 
+EMBED_BATCH_SIZE = 128
+
+
+def embed_batched(
+    backend: EmbeddingBackend, texts: list[str], *, batch_size: int = EMBED_BATCH_SIZE
+) -> list[list[float]]:
+    """Embed ``texts`` in bounded batches, preserving order.
+
+    One unbatched call over a large corpus risks backend request-size limits and memory
+    spikes, so E3 (chunk auto-embed), semantic chunking, and B3 (reembed) all route
+    through here. A responding backend that returns the wrong count is a data-integrity
+    fault, not an availability gap: deny — never zip-truncate.
+    """
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start : start + batch_size]
+        out = backend.embed(batch)
+        if len(out) != len(batch):
+            raise KaizenDenied(
+                "DENIED_EMBED_MISMATCH",
+                {
+                    "expected": len(batch),
+                    "got": len(out),
+                    "batch_start": start,
+                    "required_action": "embedding backend returned a mismatched vector count",
+                },
+                exit_code=1,
+            )
+        vectors.extend(out)
+    return vectors
+
+
 def get_text_backend() -> Optional[TextBackend]:
     """The configured advisory text backend, or None when none is configured (opt-in)."""
     model = os.environ.get("KAIZEN_LLM_MODEL")
@@ -108,4 +140,4 @@ def get_text_backend() -> Optional[TextBackend]:
     )
 
 
-__all__ = ["EmbeddingBackend", "TextBackend", "get_embedding_backend", "get_text_backend"]
+__all__ = ["EmbeddingBackend", "TextBackend", "embed_batched", "get_embedding_backend", "get_text_backend"]

@@ -49,6 +49,53 @@ def assert_under(root: Path, target: Path) -> Path:
     return target_resolved
 
 
+def path_in_repo(path: Path) -> bool:
+    try:
+        assert_under(REPO_ROOT, path)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_user_path(
+    raw_path: str | None,
+    *,
+    require_file: bool = True,
+    repo_only: bool = True,
+    allow_external_hint: bool = False,
+) -> Path:
+    """One path-trust policy for every ``--path``-taking op (A1/A2/E1/...).
+
+    Repo-only by default: records must stay portable and free of machine paths, so a
+    path outside REPO_ROOT (including ``../`` traversal) is denied unless the op
+    explicitly opted out via ``repo_only=False`` (the ``--allow-external`` flag).
+    ``allow_external_hint`` picks the denial wording for ops that HAVE that flag.
+    """
+    if not raw_path:
+        raise KaizenDenied("DENIED_PATH_REQUIRED", {"required_action": "resubmit with --path"}, exit_code=2)
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    if repo_only and not path_in_repo(path):
+        hint = (
+            ", or resubmit with --allow-external"
+            if allow_external_hint
+            else "; copy external evidence under AI/work/ first"
+        )
+        raise KaizenDenied(
+            "DENIED_PATH_OUTSIDE_REPO",
+            {
+                "path": str(path.resolve()),
+                "required_action": f"reference a file inside the repository{hint}",
+            },
+            exit_code=2,
+        )
+    path = path.resolve()
+    if require_file and not path.is_file():
+        raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"path": str(path)}, exit_code=1)
+    return path
+
+
 def operation_task_dir(name: str) -> Path:
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name.strip().lower())
     path = WORK_ROOT / (safe or "kaizen-task")
@@ -69,4 +116,11 @@ def read_text_file(raw_path: str, *, encoding: str = "utf-8-sig") -> str:
             {"path": str(path), "required_action": "pass a path to an existing file"},
             exit_code=2,
         )
-    return path.read_text(encoding=encoding)
+    try:
+        return path.read_text(encoding=encoding)
+    except UnicodeDecodeError as error:
+        raise KaizenDenied(
+            "DENIED_FILE_NOT_UTF8",
+            {"path": str(path), "required_action": "re-encode the file as UTF-8 and resubmit"},
+            exit_code=2,
+        ) from error

@@ -34,6 +34,17 @@ Generated 2026-07-03T23:15:29+00:00 (UTC), mode `full`, total 359.9s.
   median-sized local agent session transcript for this project. Token counts use the
   chars-divided-by-4 heuristic; only aggregate sizes are recorded, never content.
 
+## Limits
+
+- These numbers are **repository-local and illustrative**, not a portable benchmark: the
+  context-recovery baseline is this project's own median session transcript, so the ratio
+  reflects this repo's transcripts, not yours.
+- Token counts are a `chars / 4` approximation, not a real tokenizer count.
+- Retrieval hit rate is synthetic: each query targets a marker phrase unique to one seeded
+  document, so it measures correctness (does the right doc come back), not ranking quality.
+- Latency is machine- and state-dependent (see the MVCC write-log note above); treat the
+  reference run as a shape, not a guarantee.
+
 ## Op Write Latency
 
 | Op   | Alias            | n   | median ms | p95 ms | min ms | max ms |

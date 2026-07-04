@@ -21,7 +21,7 @@ from typing import Any
 from .db import fetch_all, fetch_one, new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import file_sha256, utc_text_hash, validate_text_fields
-from .paths import REPO_ROOT, repo_relative
+from .paths import path_in_repo, repo_relative, resolve_user_path
 from .schemas import KAIZEN_ENUMS, validate_record
 from .task_records import _text_arg
 
@@ -46,25 +46,89 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"[ \t]+\n", "\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
 
 
-def _backend_unavailable(ext: str, package: str, extra: str) -> KaizenDenied:
+def _backend_unavailable(ext: str, package: str) -> KaizenDenied:
     return KaizenDenied(
         "DENIED_BACKEND_UNAVAILABLE",
         {
             "ext": ext,
             "package": package,
-            "required_action": f"activate the optional backend: pip install agent-kaizen[{extra}] (provides {package})",
+            "required_action": f"install the opt-in doc backends: pip install -r requirements-docs.txt (provides {package})",
         },
         exit_code=2,
     )
 
 
+# Guards for hostile or degenerate PDFs. Env-overridable so operators can tune them and tests
+# can shrink them without writing multi-MB fixtures; the defaults are the shipped policy.
+MAX_PDF_BYTES = int(os.environ.get("KAIZEN_MAX_PDF_BYTES") or 25 * 1024 * 1024)
+MAX_PDF_PAGES = int(os.environ.get("KAIZEN_MAX_PDF_PAGES") or 500)
+
+
 def _extract_pdf(path: Path) -> tuple[str, str, str, float]:
+    # Size gate first, BEFORE the pypdf import: it needs no optional dependency and
+    # stops a hostile multi-GB file before any parsing work happens.
+    size = path.stat().st_size
+    if size > MAX_PDF_BYTES:
+        raise KaizenDenied(
+            "DENIED_FILE_TOO_LARGE",
+            {
+                "path": str(path),
+                "bytes": size,
+                "max_bytes": MAX_PDF_BYTES,
+                "required_action": "keep PDFs under the inline-ingestion size cap or pre-extract the text to .txt/.md",
+            },
+            exit_code=2,
+        )
     try:
         import pypdf  # type: ignore
     except Exception as error:
-        raise _backend_unavailable(".pdf", "pypdf", "docs") from error
-    reader = pypdf.PdfReader(str(path))
-    text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+        raise _backend_unavailable(".pdf", "pypdf") from error
+    try:
+        reader = pypdf.PdfReader(str(path))
+        if reader.is_encrypted:
+            raise KaizenDenied(
+                "DENIED_PDF_ENCRYPTED",
+                {
+                    "path": str(path),
+                    "required_action": "decrypt or re-export the PDF without a password before ingesting",
+                },
+                exit_code=2,
+            )
+        pages = len(reader.pages)
+        if pages > MAX_PDF_PAGES:
+            raise KaizenDenied(
+                "DENIED_PDF_TOO_MANY_PAGES",
+                {
+                    "path": str(path),
+                    "pages": pages,
+                    "max_pages": MAX_PDF_PAGES,
+                    "required_action": "split the PDF or pre-extract the text to .txt/.md",
+                },
+                exit_code=2,
+            )
+        text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    except KaizenDenied:
+        raise
+    except Exception as error:
+        # Malformed PDFs surface as assorted pypdf/struct errors; keep them structured.
+        raise KaizenDenied(
+            "DENIED_PDF_UNREADABLE",
+            {
+                "path": str(path),
+                "reason": str(error),
+                "required_action": "repair the PDF or pre-extract the text to .txt/.md",
+            },
+            exit_code=2,
+        ) from error
+    if not text.strip():
+        raise KaizenDenied(
+            "DENIED_PDF_NO_TEXT",
+            {
+                "path": str(path),
+                "required_action": "the PDF has no extractable text (likely scanned); OCR or pre-extract it externally",
+            },
+            exit_code=2,
+        )
     return text, "pypdf", "pdftext", 0.8
 
 
@@ -72,7 +136,7 @@ def _extract_docx(path: Path) -> tuple[str, str, str, float]:
     try:
         import docx  # type: ignore
     except Exception as error:
-        raise _backend_unavailable(".docx", "python-docx", "docs") from error
+        raise _backend_unavailable(".docx", "python-docx") from error
     document = docx.Document(str(path))
     text = "\n\n".join(p.text for p in document.paragraphs)
     return text, "python-docx", "native", 0.9
@@ -82,7 +146,7 @@ def _extract_xlsx(path: Path) -> tuple[str, str, str, float]:
     try:
         import openpyxl  # type: ignore
     except Exception as error:
-        raise _backend_unavailable(".xlsx", "openpyxl", "docs") from error
+        raise _backend_unavailable(".xlsx", "openpyxl") from error
     workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     lines: list[str] = []
     for sheet in workbook.worksheets:
@@ -115,7 +179,7 @@ def _extract_text(path: Path) -> tuple[str, str, str, str, float]:
         "DENIED_UNSUPPORTED_MEDIA",
         {
             "ext": ext,
-            "required_action": "supported natively: .txt .md .html .csv; .pdf/.docx/.xlsx via the optional [docs] extra",
+            "required_action": "supported natively: .txt .md .html .csv; .pdf/.docx/.xlsx via the optional doc backends (pip install -r requirements-docs.txt)",
         },
         exit_code=2,
     )
@@ -168,6 +232,11 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _escape_like(query: str) -> str:
+    """Escape LIKE wildcards so a literal % or _ in the query cannot over-match."""
+    return query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _split_segments(text: str) -> list[tuple[str, int]]:
     """Paragraph-ish segments with their start offset in ``text`` (for semantic chunking)."""
     segments: list[tuple[str, int]] = []
@@ -218,18 +287,20 @@ def _semantic_chunk(
 
 
 def ingest_file(args: Any) -> dict[str, Any]:
-    raw_path = getattr(args, "path", None)
-    if not raw_path:
-        raise KaizenDenied("DENIED_PATH_REQUIRED", {"required_action": "resubmit with --path"}, exit_code=2)
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    if not path.is_file():
-        raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"path": str(path)}, exit_code=1)
+    allow_external = bool(getattr(args, "allow_external", False))
+    path = resolve_user_path(
+        getattr(args, "path", None),
+        require_file=True,
+        repo_only=not allow_external,
+        allow_external_hint=not allow_external,
+    )
 
     text, media_type, backend, extraction_method, confidence = _extract_text(path)
     sha = file_sha256(path)
-    rel = repo_relative(path)
+    # External ingests store a sanitized origin (basename + content hash), never an
+    # absolute machine path: text fields are redaction-gated, so the path column and
+    # the derived summary must honor the same private-by-default rule.
+    rel = repo_relative(path) if path_in_repo(path) else f"external:{path.name}"
     blocks = _split_blocks(text)
 
     summary = _text_arg(args, "summary", f"Ingested {rel} ({len(blocks)} blocks).")
@@ -381,7 +452,7 @@ def chunk_document(args: Any) -> dict[str, Any]:
             exit_code=2,
         )
     if chunker == "semantic":
-        from .backends import get_embedding_backend
+        from .backends import embed_batched, get_embedding_backend
 
         sem_backend = get_embedding_backend()
         if sem_backend is None:
@@ -392,7 +463,7 @@ def chunk_document(args: Any) -> dict[str, Any]:
             )
         segments = _split_segments(full_text)
         if len(segments) > 1:
-            seg_vectors = sem_backend.embed([seg for seg, _start in segments])  # raises DENIED if the backend/extra is absent
+            seg_vectors = embed_batched(sem_backend, [seg for seg, _start in segments])  # raises DENIED if the backend/extra is absent
             pieces = _semantic_chunk(segments, seg_vectors)
         else:
             pieces = _recursive_chunk(full_text)
@@ -429,26 +500,16 @@ def chunk_document(args: Any) -> dict[str, Any]:
     embeddings: list[list[float]] | None = None
     embedding_model: str | None = None
     embedding_note: str | None = None
-    from .backends import get_embedding_backend
+    from .backends import embed_batched, get_embedding_backend
 
     _embed_backend = get_embedding_backend()
     if _embed_backend is not None:
         try:
-            _vectors = _embed_backend.embed([payload["text"] for _cid, payload in records])
-            if len(_vectors) != len(records):
-                # A responding backend that returns the wrong count is a data-integrity
-                # fault, not an availability gap: deny (same contract as B3 reembed)
-                # instead of silently storing unembedded chunks.
-                raise KaizenDenied(
-                    "DENIED_EMBED_MISMATCH",
-                    {
-                        "expected": len(records),
-                        "got": len(_vectors),
-                        "required_action": "embedding backend returned a mismatched vector count; retry or run B3 after fixing the backend",
-                    },
-                    exit_code=1,
-                )
-            embeddings = _vectors
+            # Batched: one unbatched call over a large corpus risks request-size and
+            # memory failures. A wrong per-batch count is a data-integrity fault and
+            # denies (same contract as B3 reembed) instead of silently storing
+            # unembedded chunks.
+            embeddings = embed_batched(_embed_backend, [payload["text"] for _cid, payload in records])
             embedding_model = _embed_backend.model
         except KaizenDenied as denied:
             if denied.code == "DENIED_EMBED_MISMATCH":
@@ -589,13 +650,9 @@ def query_evidence(args: Any) -> dict[str, Any]:
     mode = "like"
     # Turso FTS (Tantivy) is an experimental engine feature in the current build; opt in only
     # when the engine is started with it enabled. Lexical LIKE is the always-available baseline.
+    # The FTS index itself is created during K1 check/init (env-gated), never on this hot path.
     if os.environ.get("KAIZEN_TURSO_FTS") == "1":
         try:
-            write_tx(
-                lambda conn, _a: conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_evidence_chunks_fts ON evidence_chunks USING fts (text)"
-                )
-            )
             rows = fetch_all(
                 "SELECT id, document_id, source_lock_id, context, neighbor_prev_id, neighbor_next_id, "
                 "substr(text, 1, 240), fts_score(text, ?) AS score FROM evidence_chunks "
@@ -606,10 +663,11 @@ def query_evidence(args: Any) -> dict[str, Any]:
         except Exception:
             rows = None
     if rows is None:
-        pattern = f"%{query}%"
+        pattern = f"%{_escape_like(query)}%"
         rows = fetch_all(
             "SELECT id, document_id, source_lock_id, context, neighbor_prev_id, neighbor_next_id, "
-            "substr(text, 1, 240), 0 FROM evidence_chunks WHERE text LIKE ? ORDER BY created_at DESC LIMIT ?",
+            "substr(text, 1, 240), 0 FROM evidence_chunks WHERE text LIKE ? ESCAPE '\\' "
+            "ORDER BY created_at DESC LIMIT ?",
             (pattern, limit),
         )
     return {

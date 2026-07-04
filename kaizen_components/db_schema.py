@@ -562,6 +562,41 @@ def ddl_sha256() -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# Opt-in experimental Turso FTS index. Deliberately NOT part of DDL/INDEXES (and so not in
+# ddl_sha256): it is created only when KAIZEN_TURSO_FTS=1, and folding it into the hashed
+# manifest would shift expected_manifest_hash for every existing DB. Applied during K1.
+FTS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_evidence_chunks_fts ON evidence_chunks USING fts (text)"
+
+
+# Referential-integrity map for the read-only K1 --integrity scan (SCHEMA v1 ships no FK
+# constraints, so this is application-level). Each entry is child (table, column) -> parent
+# (table, column); a non-NULL child value with no matching parent row is an orphan. Kept
+# CONSERVATIVE on purpose: only clear structural-ownership and promotion-lineage id links.
+# Deliberately EXCLUDED as soft/annotational references: the optional *task_id* columns
+# (ledger/gotcha/learning/tasks annotations that may point across sessions), irl_reviews.review_id
+# (a grouping key, not a row id), verification proof_id, and the self-referential neighbor/parent
+# links (which can transiently dangle mid-write). This is a plain dict, NOT hashed DDL.
+REFERENCES: list[tuple[str, str, str, str]] = [
+    ("gotcha_revision", "gotcha_id", "gotcha", "id"),
+    ("learning_revision", "learning_id", "learning", "id"),
+    ("learned_revision", "learned_id", "learned", "id"),
+    ("task_revision", "task_id", "tasks", "id"),
+    ("plan_revision", "plan_id", "plans", "id"),
+    ("private_policy_revision", "policy_id", "private_policy", "id"),
+    ("learning", "source_gotcha_id", "gotcha", "id"),
+    ("learned", "source_learning_id", "learning", "id"),
+    ("evidence_documents", "source_lock_id", "source_locks", "id"),
+    ("evidence_blocks", "document_id", "evidence_documents", "id"),
+    ("evidence_chunks", "document_id", "evidence_documents", "id"),
+    ("evidence_chunks", "source_lock_id", "source_locks", "id"),
+    ("eval_runs", "eval_case_id", "eval_cases", "id"),
+    ("eval_scores", "trace_event_id", "trace_events", "id"),
+    ("eval_scores", "eval_run_id", "eval_runs", "id"),
+    ("eval_scores", "verification_id", "verification_events", "id"),
+    ("generative_runs", "workflow_artifact_id", "artifacts", "id"),
+]
+
+
 def schema_manifest() -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,

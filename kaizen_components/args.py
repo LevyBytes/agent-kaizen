@@ -345,6 +345,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("operation", nargs="?", help="operation code or named alias, such as K1 or db-check")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--version", action="store_true", help="show tool version")
+    parser.add_argument(
+        "--integrity",
+        action="store_true",
+        help="K1: also scan cross-table id references for orphaned rows (read-only)",
+    )
+    parser.add_argument(
+        "--restamp-manifest",
+        action="store_true",
+        dest="restamp_manifest",
+        help="K1: reconcile the stored DDL manifest hash to the current engine (only when schema_ok)",
+    )
     parser.add_argument("--id", help="record id")
     parser.add_argument("--task-id", help="task id")
     parser.add_argument("--trace-id", help="trace id grouping related events")
@@ -375,6 +386,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--query", help="query text")
     parser.add_argument("--limit", type=int, help="maximum records")
     parser.add_argument("--path", help="file or fixture path")
+    parser.add_argument(
+        "--allow-external",
+        action="store_true",
+        dest="allow_external",
+        help="A2/E1: permit a path outside the repo (stored as a sanitized external: origin, never an absolute path)",
+    )
     parser.add_argument("--kind", help="artifact or inspect kind")
     parser.add_argument("--category", help="eval category")
     parser.add_argument("--conclusion", help="verification conclusion")
@@ -434,8 +451,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if operation == "K0":
         return op_lookup(args)
     if operation == "K1":
+        if getattr(args, "restamp_manifest", False):
+            return {"status": "OK", **db.restamp_manifest()}
         status = db.initialize()
-        return {"status": "OK", "message": "Kaizen DB checked/initialized.", "schema": status}
+        result = {"status": "OK", "message": "Kaizen DB checked/initialized.", "schema": status}
+        if getattr(args, "integrity", False):
+            result["integrity"] = db.integrity_scan()
+        return result
     if operation == "K2":
         return {"status": "OK", "schema": db.schema_status()}
     if operation == "K3":

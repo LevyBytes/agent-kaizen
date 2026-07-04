@@ -7,7 +7,7 @@ from typing import Any
 from .db import fetch_all, fetch_one, new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import file_sha256, utc_text_hash, validate_text_fields
-from .paths import REPO_ROOT, assert_under, read_text_file, repo_relative
+from .paths import REPO_ROOT, assert_under, path_in_repo, read_text_file, repo_relative, resolve_user_path
 from .schemas import validate_record
 from .task_records import _text_arg
 
@@ -65,15 +65,16 @@ def add_artifact(args: Any) -> dict[str, Any]:
 
 
 def hash_file(args: Any) -> dict[str, Any]:
-    raw_path = getattr(args, "path", None)
-    if not raw_path:
-        raise KaizenDenied("DENIED_PATH_REQUIRED", {"required_action": "resubmit with --path"}, exit_code=2)
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    if not path.is_file():
-        raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"path": str(path)}, exit_code=1)
-    return {"status": "OK", "path": repo_relative(path), "sha256": file_sha256(path), "bytes": path.stat().st_size}
+    allow_external = bool(getattr(args, "allow_external", False))
+    path = resolve_user_path(
+        getattr(args, "path", None),
+        require_file=True,
+        repo_only=not allow_external,
+        allow_external_hint=not allow_external,
+    )
+    # External files report a sanitized origin, never an absolute machine path.
+    shown = repo_relative(path) if path_in_repo(path) else f"external:{path.name}"
+    return {"status": "OK", "path": shown, "sha256": file_sha256(path), "bytes": path.stat().st_size}
 
 
 def list_artifacts(args: Any) -> dict[str, Any]:

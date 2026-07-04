@@ -16,7 +16,7 @@ import json
 import time
 from typing import Any
 
-from .backends import get_embedding_backend, get_text_backend
+from .backends import embed_batched, get_embedding_backend, get_text_backend
 from .db import fetch_all, new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import utc_text_hash, validate_text_fields
@@ -146,13 +146,9 @@ def reembed(args: Any) -> dict[str, Any]:
     if not rows:
         return {"status": "OK", "reembedded": 0, "model": backend.model, "note": "no chunks needed embedding"}
 
-    vectors = backend.embed([r[1] for r in rows])  # network call OUTSIDE the tx; raises DENIED if unreachable
-    if len(vectors) != len(rows):
-        raise KaizenDenied(
-            "DENIED_EMBED_MISMATCH",
-            {"expected": len(rows), "got": len(vectors), "required_action": "embedding backend returned a mismatched vector count"},
-            exit_code=1,
-        )
+    # Batched network calls OUTSIDE the tx; raises DENIED if unreachable or on a
+    # per-batch count mismatch (large corpora would blow request-size limits unbatched).
+    vectors = embed_batched(backend, [r[1] for r in rows])
     model = backend.model
 
     def op(conn: Any, _attempt: int) -> None:

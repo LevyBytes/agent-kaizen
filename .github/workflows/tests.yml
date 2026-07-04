@@ -15,11 +15,23 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-kaizen.txt
       - name: Run the suite (isolated KAIZEN_REPO_ROOT temp roots; the live tests use in-process mock servers, no network)
         run: python -m unittest discover -s AI/tests
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Audit declared dependencies for known advisories
+        run: |
+          python -m pip install pip-audit
+          pip-audit -r requirements-kaizen.txt -r requirements-docs.txt

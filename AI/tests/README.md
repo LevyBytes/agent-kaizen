@@ -1,7 +1,8 @@
 # AI/tests/
 
-Automated tests for the Agent Kaizen harness — 219 tests across 26 modules. Standard-library
+Automated tests for the Agent Kaizen harness — 243 tests across 27 modules. Standard-library
 `unittest` only — no extra dependencies beyond the pinned runtime in `requirements-kaizen.txt`.
+(A handful of PDF-guard tests skip unless the opt-in `requirements-docs.txt` backends are installed.)
 
 ## Isolation (the real DB is never touched)
 
@@ -35,7 +36,13 @@ Tests invoke `sys.executable`, so run them with the project venv's Python (the o
 - `test_bench_smoke.py` — `support_scripts/bench_kaizen.py --quick` runs green into a temp
   output dir (valid results JSON, perfect retrieval hit rate, semantic skipped, no personal
   paths) and never rewrites the repo's own `README.md`/`docs/BENCHMARKS.md`.
-- `test_schema.py` — `K1` is idempotent, `K2` reports a healthy schema, `K3`/`K6` run.
+- `test_schema.py` — `K1` is idempotent, `K2` reports a healthy schema, `K3`/`K6` run, plus the
+  manifest-drift write gate (fail-closed + `K1 --restamp-manifest` reconciliation) and the
+  `K1 --integrity` cross-table orphan scan (clean DB and a seeded orphan).
+- `test_input_hardening.py` — the unified repo-only path policy (`E1`/`A2` deny outside-repo paths;
+  `--allow-external` stores a sanitized `external:` origin), the UTF-8 decode denial on `--*-file`
+  inputs, LIKE wildcard escaping in lexical search, and the PDF ingestion guards
+  (size/pages/encrypted/no-text; pypdf-dependent cases skip when the docs backend is absent).
 - `test_db_retry.py` — retry-vocabulary/backoff unit tests plus a 4-process concurrent `K1` race
   regression against one shared data plane.
 - `test_learning_ops.py` — the full L\* lifecycle: adds, `L2`/`L3` promotion linkage
@@ -74,7 +81,9 @@ Tests invoke `sys.executable`, so run them with the project venv's Python (the o
   and graceful denials (`DENIED_BACKEND_UNAVAILABLE` with no server, missing `--path`, bad workflow type).
 - `test_backends.py` — the model-backend ops (`B*`) + embedding seam, with no live server: `B1`
   reports unconfigured/unreachable backends, `B2`/`B3`/`E4 --semantic` deny cleanly when unconfigured,
-  and `E1`→`E3`→`E4` still chunk + lexically search with no embeddings (graceful degradation).
+  and `E1`→`E3`→`E4` still chunk + lexically search with no embeddings (graceful degradation). Also
+  unit-tests the HTTP retry classifier (transient vs permanent, `Retry-After` honoring) and the
+  bounded `embed_batched` helper (ordered batches, count-mismatch denial).
 - `test_pytorch.py` — the sentence-transformers selection + `semantic` chunker without the heavy
   extra installed: the in-process embedder is recognized, the absent extra denies cleanly, `neural`
   is reserved, and `semantic` chunking requires a configured backend (absent-extra tests skip if installed).

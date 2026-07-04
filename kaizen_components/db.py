@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 import uuid
@@ -10,7 +11,15 @@ from typing import Any, Callable
 
 from . import TOOL_VERSION
 from .db_retry import ATTEMPTS, is_retryable, retry_delay, with_retry
-from .db_schema import DDL, INDEXES, MIGRATION_ID, SCHEMA_VERSION, schema_manifest
+from .db_schema import (
+    DDL,
+    FTS_INDEX_SQL,
+    INDEXES,
+    MIGRATION_ID,
+    REFERENCES,
+    SCHEMA_VERSION,
+    schema_manifest,
+)
 from .denials import KaizenDenied
 from .hashing import file_sha256, utc_text_hash
 from .paths import DB_PATH, DB_ROOT, MANIFEST_ROOT, ensure_runtime_dirs, repo_relative
@@ -69,6 +78,13 @@ def initialize() -> dict[str, Any]:
             conn.execute(stmt)
         for stmt in INDEXES:
             conn.execute(stmt)
+        # Opt-in experimental FTS index, created here (K1) rather than on the E4 query hot
+        # path. Best-effort: the Tantivy engine is gated in some builds, so never fail K1.
+        if os.environ.get("KAIZEN_TURSO_FTS") == "1":
+            try:
+                conn.execute(FTS_INDEX_SQL)
+            except Exception:
+                pass
         # INSERT OR IGNORE instead of check-then-insert: two processes racing K1 would
         # otherwise both see no row and collide on the PRIMARY KEY (UNIQUE violations are
         # not in is_retryable(), so the loser would fail hard instead of retrying).
@@ -122,8 +138,9 @@ def schema_status() -> dict[str, Any]:
         "manifest_hash": row[4],
         "expected_schema_version": SCHEMA_VERSION,
         "expected_migration_id": MIGRATION_ID,
-        # Informational, not gating: the manifest now hashes the DDL text, so this flags
-        # engine-vs-DB drift (e.g. a column added in code) that version/migration ids miss.
+        # Gating on writes: the manifest hashes the DDL text, so this flags engine-vs-DB
+        # drift (e.g. a column added in code) that version/migration ids miss. A benign
+        # additive engine update is reconciled with K1 --restamp-manifest.
         "expected_manifest_hash": expected_manifest_hash,
         "manifest_match": row[4] == expected_manifest_hash,
         "schema_ok": int(row[0]) == SCHEMA_VERSION and row[1] == MIGRATION_ID,
@@ -144,6 +161,99 @@ def ensure_schema() -> None:
                 "required_action": "inspect with K2; do not write until schema is repaired or migrated",
             },
         )
+    # Fail closed on DDL drift: the stored manifest hash no longer matches the engine's DDL,
+    # so a table shape changed without a MIGRATION_ID bump. Reads stay open; writes stop.
+    if status.get("manifest_match") is False:
+        raise KaizenDenied(
+            "DENIED_SCHEMA_DRIFT",
+            {
+                "db_path": str(DB_PATH),
+                "stored_manifest_hash": status.get("manifest_hash"),
+                "expected_manifest_hash": status.get("expected_manifest_hash"),
+                "required_action": (
+                    "inspect with K2; if this is a known additive engine update (not a real "
+                    "migration), reconcile with: python kaizen.py K1 --restamp-manifest"
+                ),
+            },
+        )
+
+
+def restamp_manifest() -> dict[str, Any]:
+    """Reconcile the stored DDL manifest hash to the current engine.
+
+    Only allowed when schema_ok (version + migration id still match): that scopes this to
+    benign additive DDL drift and refuses to paper over a real, unmigrated schema change.
+    """
+    status = schema_status()
+    if not status.get("exists"):
+        raise KaizenDenied(
+            "DENIED_SCHEMA_STATUS",
+            {"db_path": str(DB_PATH), "required_action": "run K1 to initialize the DB first"},
+            exit_code=2,
+        )
+    if not status.get("schema_ok"):
+        raise KaizenDenied(
+            "DENIED_SCHEMA_STATUS",
+            {
+                "db_path": str(DB_PATH),
+                "reason": status.get("reason", "schema_version/migration_id mismatch is a real migration, not drift"),
+                "required_action": "this is a version/migration change, not additive drift; migrate the schema instead of restamping",
+            },
+            exit_code=2,
+        )
+    old_hash = status.get("manifest_hash")
+    new_hash = status.get("expected_manifest_hash")
+    if old_hash == new_hash:
+        return {"restamped": False, "manifest_hash": new_hash, "note": "manifest already matches; nothing to do"}
+    with_retry(
+        connect,
+        lambda conn, _a: conn.execute(
+            "UPDATE schema_version SET manifest_hash = ?, tool_version = ? WHERE id = ?",
+            (new_hash, TOOL_VERSION, "current"),
+        ),
+    )
+    return {"restamped": True, "old_manifest_hash": old_hash, "manifest_hash": new_hash}
+
+
+def integrity_scan() -> dict[str, Any]:
+    """Read-only cross-table reference scan (SCHEMA v1 ships no FK constraints).
+
+    For each child (table, column) -> parent (table, column) in REFERENCES, count non-NULL
+    child values with no matching parent row. NULL child references are valid (optional).
+    """
+    relationships: list[dict[str, Any]] = []
+    total_orphans = 0
+    for child_table, child_col, parent_table, parent_col in REFERENCES:
+        rows = read_retry(
+            lambda conn, ct=child_table, cc=child_col, pt=parent_table, pc=parent_col: list(
+                conn.execute(
+                    f"SELECT ct.{cc}, ct.id FROM {ct} AS ct "
+                    f"LEFT JOIN {pt} AS pt ON ct.{cc} = pt.{pc} "
+                    f"WHERE ct.{cc} IS NOT NULL AND pt.{pc} IS NULL "
+                    f"ORDER BY ct.id LIMIT 6"
+                ).fetchall()
+            )
+        )
+        count = len(rows)
+        total_orphans += count
+        entry: dict[str, Any] = {
+            "child": f"{child_table}.{child_col}",
+            "parent": f"{parent_table}.{parent_col}",
+            "orphans": count,
+        }
+        if rows:
+            entry["sample"] = [{"child_id": r[1], "missing_ref": r[0]} for r in rows[:5]]
+            if count > 5:
+                entry["sample_truncated"] = True
+        relationships.append(entry)
+    return {
+        "ok": total_orphans == 0,
+        "total_orphans": total_orphans,
+        "relationships_checked": len(REFERENCES),
+        # Only surface relationships that actually have orphans, to keep the payload compact.
+        "orphaned_relationships": [r for r in relationships if r["orphans"]],
+        "note": "read-only reference scan; NULL references are valid. SCHEMA v1 has no FK constraints.",
+    }
 
 
 def write_tx(operation: Callable[[Any, int], Any]) -> Any:

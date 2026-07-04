@@ -563,6 +563,22 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `B2`  | `model-run`                | Advisory text via the LLM backend      |
 | `B3`  | `reembed`                  | Backfill evidence-chunk embeddings     |
 
+### Operational Flags And File Safety
+
+A few cross-cutting flags harden the ops that touch files or the schema:
+
+- **Repo-only paths by default.** File-taking ops (`A1`, `A2`, `E1`) accept only paths inside the
+  repository, so records stay portable and free of machine-specific absolute paths. To ingest or
+  hash a file outside the repo, pass `--allow-external`; the record then stores a sanitized origin
+  (`external:<filename>` plus the content hash), never the absolute path.
+- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records
+  (SCHEMA v1 ships no foreign-key constraints, so this is the integrity check).
+- **`K1 --restamp-manifest`** reconciles the stored schema manifest hash after a benign additive
+  engine update. Writes fail closed on manifest drift (a DDL change with no migration bump); this is
+  the sanctioned way to clear that once you have confirmed the drift is expected.
+- **PDF ingestion is guarded**: size, page-count, encrypted, and no-extractable-text (scanned)
+  PDFs are denied with a structured message rather than hanging or spiking memory.
+
 ## Local Database And Backend
 
 The current harness uses Turso Database through Python direct local file access with `pyturso`. The local DB path is `AI/db/kaizen.db`.
@@ -593,6 +609,7 @@ repo/
 |-- kaizen.py
 |-- kaizen_components/
 |-- requirements-kaizen.txt
+|-- requirements-docs.txt
 |-- setup/
 |   `-- SETUP.md
 |-- AI/
@@ -664,6 +681,10 @@ stays entirely off until you install or point at it:
   in-process embeddings with no server to run, plus an embedder-backed `semantic` chunker for
   `E3`. Install [`requirements-pytorch.txt`](requirements-pytorch.txt); setup in
   [`setup/PYTORCH.md`](setup/PYTORCH.md). For local advisory text generation, use Ollama.
+- **Document ingestion** (`.pdf` / `.docx` / `.xlsx` in `E1`) — the native readers cover
+  `.txt` / `.md` / `.html` / `.csv` with no install; the richer formats activate when you install
+  [`requirements-docs.txt`](requirements-docs.txt) (pypdf, python-docx, openpyxl). Keep pypdf recent
+  for its malformed-PDF fixes.
 
 Two rules hold no matter what you enable: skip all three and the deterministic chunker plus
 lexical search still cover the base case, and model output is advisory only — it never becomes
