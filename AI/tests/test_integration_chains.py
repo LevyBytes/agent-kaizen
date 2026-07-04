@@ -235,7 +235,9 @@ class IntegrationChainsTest(IsolatedDBTest):
         self.assertEqual(rc, 2, p)
         self.assertEqual(p.get("code"), "DENIED_PATH_OUTSIDE_REPO", p)
 
-        rc, p = self.kz("A1", "--path", "..\\escape.txt")
+        # Forward slash traverses on every platform; a backslash form would be a
+        # legal FILENAME on Linux and sail straight through containment.
+        rc, p = self.kz("A1", "--path", "../escape.txt")
         self.assertEqual(rc, 2, p)
         self.assertEqual(p.get("code"), "DENIED_PATH_OUTSIDE_REPO", p)
 
