@@ -97,7 +97,7 @@ class ComfyLiveTest(IsolatedDBTest):
         self.assertTrue(p.get("output_artifact_ids"), p)
         self.assertIsNotNone(p.get("latency_ms"), p)
 
-        saved = self.root / "AI" / "generated" / "live" / "out.png"
+        saved = self.root / "AI" / "generation" / "live" / "out.png"
         self.assertTrue(saved.is_file(), f"expected saved output at {saved}")
         self.assertEqual(saved.read_bytes(), _PNG)
 

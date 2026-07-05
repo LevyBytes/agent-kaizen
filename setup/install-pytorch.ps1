@@ -2,50 +2,78 @@
 <#
   Install the OPT-IN PyTorch extra (in-process sentence-transformers embeddings + semantic chunking).
 
-  Embeddings run IN-PROCESS, so this installs into the python on PATH -- run it with the SAME python
-  (venv) you launch kaizen.py with. Redirects the HuggingFace weight cache to $DEVROOT/models via
-  HF_HOME so weights stay out of the repo. torch is heavy + GPU-specific (use -Gpu for a CUDA wheel).
-
-  Usage: setup\install-pytorch.ps1 [-Gpu] [-CudaIndex URL] [-DevRoot D:\dev]
+  Usage:
+    setup\install-pytorch.ps1 [-Gpu] [-CudaIndex URL] [-DevRoot D:\dev] [-PythonExe path]
+    setup\install-pytorch.ps1 -ListSteps
+    setup\install-pytorch.ps1 -PlanOnly -NoNetwork -NoExternalActions
 #>
 [CmdletBinding()]
 param(
     [string]$DevRoot,
+    [string]$PythonExe,
     [switch]$Gpu,
-    [string]$CudaIndex = 'https://download.pytorch.org/whl/cu121'
+    [string]$CudaIndex = 'https://download.pytorch.org/whl/cu121',
+    [switch]$PlanOnly,
+    [switch]$ListSteps,
+    [string]$EmitPlanJson,
+    [switch]$SelfTest,
+    [switch]$NoProgressHeader,
+    [switch]$NoNetwork,
+    [switch]$NoExternalActions,
+    [switch]$NoUserEnvWrites,
+    [switch]$AssumeYes,
+    [switch]$NoInput
 )
 $ErrorActionPreference = 'Stop'
-function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Warn($m) { Write-Host "  ! $m" -ForegroundColor Yellow }
-function Die($m)  { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
+. (Join-Path $PSScriptRoot 'installer-common.ps1')
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-if (-not $DevRoot) {
-    if ($env:DEVROOT) { $DevRoot = $env:DEVROOT } else { $DevRoot = Split-Path -Parent $repoRoot }
+$resolvedDevRoot = Resolve-AkDevRoot -DevRoot $DevRoot -RepoRoot $repoRoot -NoInput:$NoInput
+$steps = @(
+    [pscustomobject]@{ Id='preflight'; Name='Resolve DEVROOT, Python, and model cache' },
+    [pscustomobject]@{ Id='torch'; Name='Install or validate torch wheel' },
+    [pscustomobject]@{ Id='extra'; Name='Install Agent Kaizen PyTorch extra' },
+    [pscustomobject]@{ Id='summary'; Name='Print backend environment and verification command' }
+)
+Initialize-AkInstaller -Name 'Agent Kaizen PyTorch extra installer' -RepoRoot $repoRoot -DevRoot $resolvedDevRoot -Steps $steps -PlanOnly:($PlanOnly -or $ListSteps) -NoProgressHeader:$NoProgressHeader -NoNetwork:$NoNetwork -NoExternalActions:$NoExternalActions -NoUserEnvWrites:$NoUserEnvWrites -AssumeYes:$AssumeYes -NoInput:$NoInput -SelfTest:$SelfTest
+
+if ($ListSteps -or $PlanOnly) {
+    Show-AkPlan
+    if (-not [string]::IsNullOrWhiteSpace($EmitPlanJson)) { Write-AkPlanJson -Path $EmitPlanJson }
+    exit 0
 }
-$cache = Join-Path $DevRoot 'models'
-New-Item -ItemType Directory -Force -Path $cache | Out-Null
-$env:HF_HOME = $cache
+if ($SelfTest) { Show-AkPlan }
 
-$pyCmd = Get-Command python -ErrorAction SilentlyContinue
-if (-not $pyCmd) { $pyCmd = Get-Command py -ErrorAction SilentlyContinue }
-if (-not $pyCmd) { Die 'python not found on PATH.' }
-$python = $pyCmd.Source
-Step "Installing into: $python  (must be the venv you run kaizen.py with)"
-Step "HF weight cache: $cache  (HF_HOME)"
+$script:AkPython = ''
+$script:AkCache = Join-Path $resolvedDevRoot 'models'
 
-if ($Gpu) {
-    Step "Installing CUDA torch from $CudaIndex ..."
-    & $python -m pip install torch --index-url $CudaIndex
-    if ($LASTEXITCODE -ne 0) { Die 'torch (CUDA) install failed.' }
+Invoke-AkStep -Id 'preflight' -Name 'Resolve DEVROOT, Python, and model cache' -ScriptBlock {
+    $script:AkPython = Resolve-AkPythonExe -PythonExe $PythonExe -DevRoot $resolvedDevRoot -RequireShared
+    New-AkDirectory $script:AkCache
+    $env:HF_HOME = $script:AkCache
+    Write-Host ("Installing into: {0}" -f $script:AkPython) -ForegroundColor Cyan
+    Write-Host ("HF weight cache: {0}" -f $script:AkCache) -ForegroundColor Cyan
 }
-Step 'Installing the opt-in extra (sentence-transformers + torch) ...'
-& $python -m pip install -r (Join-Path $repoRoot 'requirements-pytorch.txt')
-if ($LASTEXITCODE -ne 0) { Die 'requirements-pytorch.txt install failed.' }
 
-Write-Host ''
-Step 'PyTorch embedding backend installed. Point Kaizen at it (current session):'
-Write-Host "  `$env:HF_HOME              = '$cache'"
-Write-Host "  `$env:KAIZEN_EMBED_BACKEND = 'sentence-transformers'"
-Write-Host "  `$env:KAIZEN_EMBED_MODEL   = 'all-MiniLM-L6-v2'   # optional; this is the default"
-Write-Host '  Verify: python kaizen.py B1 --json'
+Invoke-AkStep -Id 'torch' -Name 'Install or validate torch wheel' -ScriptBlock {
+    if ($Gpu) {
+        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','torch','--index-url',$CudaIndex) -ActivityNote ('Installing CUDA torch from {0}; pip will report package download progress when available.' -f $CudaIndex)
+    } else {
+        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','torch') -ActivityNote 'Installing CPU torch; pip output is logged and tailed while this runs.'
+    }
+}
+
+Invoke-AkStep -Id 'extra' -Name 'Install Agent Kaizen PyTorch extra' -ScriptBlock {
+    $req = Join-Path $repoRoot 'requirements-pytorch.txt'
+    if (-not (Test-Path -LiteralPath $req)) { throw "requirements file not found: $req" }
+    Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','-r',$req) -ActivityNote 'Installing sentence-transformers and pinned PyTorch extra dependencies.'
+}
+
+Invoke-AkStep -Id 'summary' -Name 'Print backend environment and verification command' -ScriptBlock {
+    Write-Host ''
+    Write-Host 'PyTorch embedding backend installed. Current-session settings:' -ForegroundColor Green
+    Write-Host ("  `$env:HF_HOME              = '{0}'" -f $script:AkCache)
+    Write-Host "  `$env:KAIZEN_EMBED_BACKEND = 'sentence-transformers'"
+    Write-Host "  `$env:KAIZEN_EMBED_MODEL   = 'all-MiniLM-L6-v2'"
+    Write-Host ("  Verify: & '{0}' '{1}' B1 --json" -f $script:AkPython, (Join-Path $repoRoot 'kaizen.py'))
+}

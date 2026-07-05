@@ -19,8 +19,9 @@ Four phases, all against an isolated ``KAIZEN_REPO_ROOT`` temp root (the real
 
 Outputs: ``docs/benchmarks.json`` + ``docs/BENCHMARKS.md`` (fully regenerated), SVG
 charts under ``docs/images/`` (render everywhere, including previews that cannot draw
-Mermaid), and the ``BENCHMARKS`` + ``BENCH-TEASER`` marker regions in ``README.md``
-(replaced wholesale). Only derived numbers and coarse machine info are written —
+Mermaid), and the ``## Benchmarks`` + ``## Benchmarks Preview`` sections in ``README.md``
+(located by heading and replaced up to the next heading). Only derived numbers and coarse
+machine info are written —
 never op payloads, hostnames, or personal paths.
 
 Usage:
@@ -45,7 +46,6 @@ import shutil
 import statistics
 import sys
 import tempfile
-import textwrap
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
@@ -54,10 +54,8 @@ from xml.sax.saxutils import escape
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-BEGIN_MARK = "<!-- BENCHMARKS:BEGIN -->"
-END_MARK = "<!-- BENCHMARKS:END -->"
-TEASER_BEGIN = "<!-- BENCH-TEASER:BEGIN -->"
-TEASER_END = "<!-- BENCH-TEASER:END -->"
+TEASER_HEADING = "## Benchmarks Preview"
+BENCHMARKS_HEADING = "## Benchmarks"
 
 BACKEND_ENV_VARS = ("KAIZEN_EMBED_MODEL", "KAIZEN_EMBED_BACKEND", "KAIZEN_LLM_MODEL", "KAIZEN_TURSO_FTS")
 
@@ -504,49 +502,26 @@ def render_benchmarks_md(results: dict) -> str:
         "",
         "# Benchmarks",
         "",
-        "Repeatable local benchmarks for the Agent Kaizen harness: the real CLI code path, timed",
-        "in-process against an isolated scratch data plane. Anyone can regenerate this file with one",
-        "command (see **Reproduce**); numbers below are the committed reference run.",
+        "Repeatable local benchmarks for the Agent Kaizen harness: the real CLI code path, timed in-process against an isolated scratch data plane. Anyone can regenerate this file with one command (see **Reproduce**); numbers below are the committed reference run.",
         "",
-        f"Reference machine: {machine_line(machine)}.",
-        f"Generated {results['generated_at']} (UTC), mode `{results['mode']}`, "
-        f"total {results['total_seconds']}s.",
+        f"Reference machine: {machine_line(machine)}. Generated {results['generated_at']} (UTC), mode `{results['mode']}`, total {results['total_seconds']}s.",
         "",
         "## Methodology",
         "",
-        "- Every operation runs through `kaizen_components.args.main()` in-process, so timings exclude",
-        "  Python interpreter startup but include argument parsing, schema checks, fresh DB",
-        "  connections, and commits — the per-op cost an agent actually pays.",
-        "- The whole run targets a throwaway `KAIZEN_REPO_ROOT` temp directory; the repo's own",
-        "  `AI/db/` is never read or written, and nothing touches the network.",
-        f"- Percentiles are nearest-rank; the clock is `time.perf_counter`. Write ops run",
-        f"  {config['warmup']} warmup + {config['write_iterations']} timed iterations each; read-back",
-        f"  ops run {config['digest_iterations']} timed iterations per scale level.",
-        "- The scale phase seeds a mix of tasks, gotchas, failed verifications, policies, and eval",
-        "  scores so every query in the R0 session digest does real work; the `learned` table stays",
-        "  empty (its digest query is a constant-cost scan).",
-        "- Read-back latency can be non-monotonic across scale levels: the engine opens a fresh",
-        "  connection per query, and connection cost tracks the size of the MVCC write log, which",
-        "  the storage layer compacts on internal thresholds. A level measured right after a seeding",
-        "  burst (log large, not yet compacted) can read slower than a larger level measured after a",
-        "  compaction. Row count is not the whole story; log state matters too.",
-        "- Retrieval hit rate is a correctness gate, not a ranking measure: lexical mode orders by",
-        "  recency, so it is meaningful only because each marker phrase is unique to one document",
-        "  (expected value: 1.0, plus a negative-control query that must return nothing).",
-        "- Context recovery compares the `R0` digest payload against the text content of the",
-        "  median-sized local agent session transcript for this project. Token counts use the",
-        "  chars-divided-by-4 heuristic; only aggregate sizes are recorded, never content.",
+        "- Every operation runs through `kaizen_components.args.main()` in-process, so timings exclude Python interpreter startup but include argument parsing, schema checks, fresh DB connections, and commits — the per-op cost an agent actually pays.",
+        "- The whole run targets a throwaway `KAIZEN_REPO_ROOT` temp directory; the repo's own `AI/db/` is never read or written, and nothing touches the network.",
+        f"- Percentiles are nearest-rank; the clock is `time.perf_counter`. Write ops run {config['warmup']} warmup + {config['write_iterations']} timed iterations each; read-back ops run {config['digest_iterations']} timed iterations per scale level.",
+        "- The scale phase seeds a mix of tasks, gotchas, failed verifications, policies, and eval scores so every query in the R0 session digest does real work; the `learned` table stays empty (its digest query is a constant-cost scan).",
+        "- Read-back latency can be non-monotonic across scale levels: the engine opens a fresh connection per query, and connection cost tracks the size of the MVCC write log, which the storage layer compacts on internal thresholds. A level measured right after a seeding burst (log large, not yet compacted) can read slower than a larger level measured after a compaction. Row count is not the whole story; log state matters too.",
+        "- Retrieval hit rate is a correctness gate, not a ranking measure: lexical mode orders by recency, so it is meaningful only because each marker phrase is unique to one document (expected value: 1.0, plus a negative-control query that must return nothing).",
+        "- Context recovery compares the `R0` digest payload against the text content of the median-sized local agent session transcript for this project. Token counts use the chars-divided-by-4 heuristic; only aggregate sizes are recorded, never content.",
         "",
         "## Limits",
         "",
-        "- These numbers are **repository-local and illustrative**, not a portable benchmark: the",
-        "  context-recovery baseline is this project's own median session transcript, so the ratio",
-        "  reflects this repo's transcripts, not yours.",
+        "- These numbers are **repository-local and illustrative**, not a portable benchmark: the context-recovery baseline is this project's own median session transcript, so the ratio reflects this repo's transcripts, not yours.",
         "- Token counts are a `chars / 4` approximation, not a real tokenizer count.",
-        "- Retrieval hit rate is synthetic: each query targets a marker phrase unique to one seeded",
-        "  document, so it measures correctness (does the right doc come back), not ranking quality.",
-        "- Latency is machine- and state-dependent (see the MVCC write-log note above); treat the",
-        "  reference run as a shape, not a guarantee.",
+        "- Retrieval hit rate is synthetic: each query targets a marker phrase unique to one seeded document, so it measures correctness (does the right doc come back), not ranking quality.",
+        "- Latency is machine- and state-dependent (see the MVCC write-log note above); treat the reference run as a shape, not a guarantee.",
         "",
         "## Op Write Latency",
         "",
@@ -568,9 +543,7 @@ def render_benchmarks_md(results: dict) -> str:
     x5_line = [entry["X5"]["median_ms"] for entry in results["digest_at_scale"]]
     parts += ["", mermaid_xychart("Read-back latency vs records seeded, median ms", scales,
                                   [("line", r0_line), ("line", x5_line)]),
-              "", "Series order: `R0` session digest first, then `X5` policy context. If a mid-size",
-              "level reads slower than a larger one, that is the MVCC write-log effect described in",
-              "**Methodology** — latency follows log-compaction state as much as row count.", ""]
+              "", "Series order: `R0` session digest first, then `X5` policy context. If a mid-size level reads slower than a larger one, that is the MVCC write-log effect described in **Methodology** — latency follows log-compaction state as much as row count.", ""]
 
     retrieval = results["retrieval"]
     parts += ["## Evidence Retrieval", ""]
@@ -585,23 +558,18 @@ def render_benchmarks_md(results: dict) -> str:
         f"{results['config']['paragraphs_per_doc']} paragraphs each, "
         f"{retrieval['E3']['chunks_total']} chunks total. Mode: `{retrieval['mode']}`.",
         "",
-        f"Hit rate over {hit['queries']} marker queries: top-1 {hit['top_1']}, top-5 {hit['top_5']};",
-        f"negative control clean: {str(hit['negative_control_clean']).lower()}.",
+        f"Hit rate over {hit['queries']} marker queries: top-1 {hit['top_1']}, top-5 {hit['top_5']}; negative control clean: {str(hit['negative_control_clean']).lower()}.",
         "",
     ]
     if retrieval["semantic"].get("skipped"):
-        parts.append(f"Semantic mode: skipped ({retrieval['semantic'].get('reason')}) — no embedding")
-        parts.append("backend configured, which is the dependency-light default. Configure one and pass")
-        parts.append("`--allow-semantic` to time vector search too.")
+        parts.append(f"Semantic mode: skipped ({retrieval['semantic'].get('reason')}) — no embedding backend configured, which is the dependency-light default. Configure one and pass `--allow-semantic` to time vector search too.")
     else:
         sem = retrieval["semantic"]
-        parts.append(f"Semantic mode ({sem.get('embedding_model')}): median {sem['median_ms']} ms,")
-        parts.append(f"p95 {sem['p95_ms']} ms over {sem['n']} queries.")
+        parts.append(f"Semantic mode ({sem.get('embedding_model')}): median {sem['median_ms']} ms, p95 {sem['p95_ms']} ms over {sem['n']} queries.")
     ctx = results.get("context_recovery")
     if ctx:
         parts += ["", "## Context Recovery", "",
-                  "What it costs to restore working context at session start: reading the `R0` session",
-                  'digest versus replaying a raw agent session transcript (the "just scroll up" baseline).', ""]
+                  'What it costs to restore working context at session start: reading the `R0` session digest versus replaying a raw agent session transcript (the "just scroll up" baseline).', ""]
         transcripts = ctx.get("transcripts", {})
         if transcripts.get("found"):
             r0_tok = ctx["r0_tokens_approx"]
@@ -617,16 +585,9 @@ def render_benchmarks_md(results: dict) -> str:
                                           [("bar", [float(r0_tok), float(tr_tok)])],
                                           y_label="approx tokens"),
                       "",
-                      f"Starting from records is about **{ctx['ratio_vs_transcript_text']:,}× cheaper**",
-                      "than replaying the median transcript — and the digest is curated state (active",
-                      "policy, open GOTCHAs, blocking verifications, lessons), not a wall of chat to",
-                      "re-read. The transcript baseline is measured from this project's own local agent",
-                      "session logs; only aggregate sizes are recorded, never content."]
+                      f"Starting from records is about **{ctx['ratio_vs_transcript_text']:,}× cheaper** than replaying the median transcript — and the digest is curated state (active policy, open GOTCHAs, blocking verifications, lessons), not a wall of chat to re-read. The transcript baseline is measured from this project's own local agent session logs; only aggregate sizes are recorded, never content."]
         else:
-            parts += ["No local agent session transcripts were found for this project, so the",
-                      "transcript-replay baseline was skipped in this run. The committed reference",
-                      "numbers come from the author's machine; regenerate on a machine with session",
-                      "history to measure your own baseline."]
+            parts += ["No local agent session transcripts were found for this project, so the transcript-replay baseline was skipped in this run. The committed reference numbers come from the author's machine; regenerate on a machine with session history to measure your own baseline."]
     parts += [
         "",
         "## Reproduce",
@@ -639,9 +600,7 @@ def render_benchmarks_md(results: dict) -> str:
         "python support_scripts/bench_kaizen.py",
         "```",
         "",
-        "`--quick` runs a tiny variant into a temp directory (used by the test suite so this script",
-        "cannot rot); `--out DIR` redirects all artifacts for a dry run; `--allow-semantic` keeps your",
-        "embedding-backend environment variables and times `E4 --semantic` when a backend responds.",
+        "`--quick` runs a tiny variant into a temp directory (used by the test suite so this script cannot rot); `--out DIR` redirects all artifacts for a dry run; `--allow-semantic` keeps your embedding-backend environment variables and times `E4 --semantic` when a backend responds.",
         "",
     ]
     return "\n".join(parts)
@@ -649,14 +608,9 @@ def render_benchmarks_md(results: dict) -> str:
 
 def render_readme_section(results: dict) -> str:
     lines = [
-        BEGIN_MARK,
-        "",
         "## Benchmarks",
         "",
-        "Real numbers from the real code path: `support_scripts/bench_kaizen.py` times the CLI",
-        "in-process (interpreter startup excluded) against an isolated scratch data plane — your",
-        "`AI/db/` is never touched. Full methodology, tables, and charts:",
-        "[docs/BENCHMARKS.md](docs/BENCHMARKS.md).",
+        "Real numbers from the real code path: `support_scripts/bench_kaizen.py` times the CLI in-process (interpreter startup excluded) against an isolated scratch data plane — your `AI/db/` is never touched. Full methodology, tables, and charts: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).",
         "",
     ]
     ctx = results.get("context_recovery", {})
@@ -670,16 +624,13 @@ def render_readme_section(results: dict) -> str:
             "![Restoring session context: the R0 digest vs replaying a session transcript]"
             "(docs/images/bench-context-recovery.svg)",
             "",
-            textwrap.fill(ratio_sentence, width=98),
+            ratio_sentence,
             "",
         ]
     lines += [
         "![Write-op latency, median milliseconds](docs/images/bench-write-latency.svg)",
         "",
-        f"Reference run: {machine_line(results['machine'])}. Regenerate with",
-        "`python support_scripts/bench_kaizen.py`.",
-        "",
-        END_MARK,
+        f"Reference run: {machine_line(results['machine'])}. Regenerate with `python support_scripts/bench_kaizen.py`.",
     ]
     return "\n".join(lines)
 
@@ -699,18 +650,36 @@ def render_teaser(results: dict) -> str:
             f"than replaying a session transcript "
         )
     sentence += "— measured, repeatable, on your machine: see [Benchmarks](#benchmarks)."
-    return "\n".join([TEASER_BEGIN, "", textwrap.fill(sentence, width=98), "", TEASER_END])
+    return "\n".join(["## Benchmarks Preview", "", sentence])
 
 
-def patch_region(readme_path: Path, begin_mark: str, end_mark: str, section: str) -> None:
-    text = readme_path.read_text(encoding="utf-8")
-    if text.count(begin_mark) != 1 or text.count(end_mark) != 1:
-        print(f"bench: expected exactly one {begin_mark}/{end_mark} pair in {readme_path}; "
-              "add the markers or rerun with --out", file=sys.stderr)
+def _is_section_boundary(line: str) -> bool:
+    """True if the line starts a new H1/H2 section (the end of the current one). A deeper
+    heading (`### ` and below) is content within the section, not a boundary."""
+    return line.startswith("## ") or line.startswith("# ")
+
+
+def replace_heading_section(readme_path: Path, heading: str, section: str) -> None:
+    """Replace the Markdown section under an exact ``## Heading`` line with ``section``.
+
+    The region runs from the heading line through the last non-blank line before the next
+    H1/H2 heading; the blank line before that next heading is preserved, so spacing stays
+    clean. Heading-delimited (no BEGIN/END marker comments). The heading is matched exactly
+    (`## Benchmarks` must not hit `## Benchmarks Preview`). Raises if the heading is absent.
+    """
+    lines = readme_path.read_text(encoding="utf-8").splitlines()
+    lo = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
+    if lo is None:
+        print(f"bench: heading {heading!r} not found in {readme_path}; add it or rerun with --out",
+              file=sys.stderr)
         raise SystemExit(1)
-    begin = text.index(begin_mark)
-    end = text.index(end_mark) + len(end_mark)
-    readme_path.write_text(text[:begin] + section + text[end:], encoding="utf-8", newline="\n")
+    last, j = lo, lo + 1
+    while j < len(lines) and not _is_section_boundary(lines[j]):
+        if lines[j].strip():
+            last = j
+        j += 1
+    new_lines = lines[:lo] + section.splitlines() + lines[last + 1:]
+    readme_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8", newline="\n")
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +793,8 @@ def main(argv: list[str] | None = None) -> int:
         (docs_dir / "BENCHMARKS.md").write_text(md_text, encoding="utf-8", newline="\n")
         for name, svg in svg_charts.items():
             (images_dir / name).write_text(svg, encoding="utf-8", newline="\n")
-        patch_region(REPO_ROOT / "README.md", BEGIN_MARK, END_MARK, section)
-        patch_region(REPO_ROOT / "README.md", TEASER_BEGIN, TEASER_END, teaser)
+        replace_heading_section(REPO_ROOT / "README.md", BENCHMARKS_HEADING, section)
+        replace_heading_section(REPO_ROOT / "README.md", TEASER_HEADING, teaser)
         print(docs_dir / "benchmarks.json")
         print(docs_dir / "BENCHMARKS.md")
         for name in svg_charts:

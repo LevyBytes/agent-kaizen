@@ -6,6 +6,7 @@ from .db import fetch_all, fetch_one, new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import utc_text_hash, validate_text_fields, validate_word_limit
 from .task_records import _text_arg
+from .text_search import like_pattern
 
 
 def _priority_rank(priority: str) -> int:
@@ -136,10 +137,11 @@ def query_policies(args: Any) -> dict[str, Any]:
     query = getattr(args, "query", None) or ""
     if not query:
         raise KaizenDenied("DENIED_QUERY_REQUIRED", {"required_action": "resubmit with --query"}, exit_code=2)
-    pattern = f"%{query}%"
+    pattern = like_pattern(query)
     rows = fetch_all(
         "SELECT id, status, scope, trigger, priority, title, summary, created_at FROM private_policy "
-        "WHERE title LIKE ? OR summary LIKE ? OR body LIKE ? OR trigger LIKE ? OR scope LIKE ? "
+        "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' "
+        "OR trigger LIKE ? ESCAPE '\\' OR scope LIKE ? ESCAPE '\\' "
         f"ORDER BY {PRIORITY_ORDER_SQL}, created_at DESC LIMIT ?",
         (pattern, pattern, pattern, pattern, pattern, int(getattr(args, "limit", None) or 20)),
     )

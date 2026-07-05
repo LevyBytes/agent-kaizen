@@ -1,7 +1,6 @@
 # Kaizen System
 
-The Kaizen System is a five-layer approach to continually improving workflows for agentic coding work. It can be used by
-humans, Codex, Claude, local models, or multi-agent workflows. Like a delicious 5 layer burrito, you'll keep coming back for more... improvements.
+The Kaizen System is a five-layer approach to continually improving workflows for agentic coding work. It can be used by humans, Codex, Claude, local models, or multi-agent workflows. Like a delicious 5 layer burrito, you'll keep coming back for more... improvements.
 
 A memorable mnemonic because every good and bad idea has one:
 
@@ -13,13 +12,13 @@ SAVMI = Scope -> Adapt -> Verify -> Manage -> Improve
 
 Cyclic product and service systems need at least five things to produce continual improvement:
 
-| Layer   | Purpose                                | Primary output                                      |
-| ------- | -------------------------------------- | --------------------------------------------------- |
-| Scope   | Turn intent and evidence into plans    | Iterative Spec, assumptions, acceptance criteria    |
-| Adapt   | Change the system through bounded work | Execution, contracts, patches, scripts, artifacts   |
-| Verify  | Decide whether the result works        | Go/no-go result, proof, structured findings         |
-| Manage  | Keep work data usable                  | Records, hashes, source locks, reports, policies    |
-| Improve | Decide what to improve next            | Retrospective, next-cycle priorities, promoted work |
+| Layer | Purpose | Primary output |
+| --- | --- | --- |
+| Scope | Turn intent and evidence into plans | Iterative Spec, assumptions, acceptance criteria |
+| Adapt | Change the system through bounded work | Execution, contracts, patches, scripts, artifacts |
+| Verify | Decide whether the result works | Go/no-go result, proof, structured findings |
+| Manage | Keep work data usable | Records, hashes, source locks, reports, policies |
+| Improve | Decide what to improve next | Retrospective, next-cycle priorities, promoted work |
 
 The Kaizen System separates responsibilities:
 
@@ -124,8 +123,7 @@ Useful status labels you could include:
 
 ## 5. Manage
 
-Manage is the durable operations layer. It is the part most agentic coding approaches I think underweight:
-records, policy, proof, context hygiene, data management, and retrieval.
+Manage is the durable operations layer. It is the part most agentic coding approaches I think underweight: records, policy, proof, context hygiene, data management, and retrieval.
 
 The data plane aspect of management helps improve efficiency for automation. The process saves what happens, stores it in a structured database, and makes it available to later cycles without requiring a full chat-history reread. Targetable, bite-sized records under one thousand characters when possible. Yay more saving tokens!
 
@@ -230,10 +228,10 @@ Route bigger skills like a good handbook, not a tutorial. A hub skill triages th
 
 Apply the same evidence authority model inside skills:
 
-| Term                           | Meaning                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------- |
-| Evidence authority             | Upstream specs, official docs, repos, test output, captured evidence    |
-| Compiled operational reference | Recontextualized material optimized for agent use                       |
+| Term | Meaning |
+| --- | --- |
+| Evidence authority | Upstream specs, official docs, repos, test output, captured evidence |
+| Compiled operational reference | Recontextualized material optimized for agent use |
 | Navigation and control surface | `SKILL.md`, indexes, routing metadata, command stubs, maintenance rules |
 
 When sources conflict, prefer higher authority tiers:
@@ -300,9 +298,7 @@ The agent-kaizen repository implements the Kaizen System with a local harness:
 
 The system concept is backend-agnostic. A project can use a different database, a remote service, or a larger governance gateway as long as the managed records remain structured, queryable, and governed by deterministic write paths.
 
-Agentgateway or similar routing gateways should be used at large scales for: centralized identity, RBAC, remote
-tool federation, model routing, budgets, rate limits, failover, and auditable traces across multiple
-agents, users, services, or machines.
+Agentgateway or similar routing gateways should be used at large scales for: centralized identity, RBAC, remote tool federation, model routing, budgets, rate limits, failover, and auditable traces across multiple agents, users, services, or machines.
 
 A local generative-backend seam belongs to this same layer: routing cheap or private sub-tasks to a local model, with budgets and routing events recorded like any other managed data. It is best designed as its own increment. A local or cheaper model can help with triage, summarization, or first-pass drafting, but it is never the final acceptance authority unless a deterministic verifier backs the decision. The first such backend has shipped: a ComfyUI workflow runner records each generative run with a graph hash, the stored workflow, the seed, and output hashes, so the asset is reproducible and replayable. It is optional and capability-activated — the agent authors the workflow, and an unreachable server fails gracefully rather than blocking the task. A second backend has joined it: an optional OpenAI-compatible model seam (a local Ollama server by default, any remote endpoint by configuration, or an in-process sentence-transformers backend with no server at all) that supplies embeddings — turning evidence-chunk storage and vector search live over Turso-native vectors — and advisory text generation. It is opt-in (configured by environment), API keys stay in the environment and are never stored, and with nothing configured the harness stays on its deterministic, lexical baseline.
 

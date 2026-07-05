@@ -18,6 +18,7 @@ from .paths import EXPORT_ROOT, read_text_file, repo_relative
 from .redaction import assert_redacted
 from .schemas import validate_record
 from .task_records import _text_arg
+from .text_search import like_pattern
 
 
 def _payload_from_args(args: Any) -> dict[str, Any]:
@@ -200,8 +201,8 @@ def query_eval_scores(args: Any) -> dict[str, Any]:
         params.append(eval_run_id)
     query = getattr(args, "query", None)
     if query:
-        conditions.append("name LIKE ?")
-        params.append(f"%{query}%")
+        conditions.append("name LIKE ? ESCAPE '\\'")
+        params.append(like_pattern(query))
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(int(getattr(args, "limit", None) or 50))
     rows = fetch_all(

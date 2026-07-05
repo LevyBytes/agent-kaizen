@@ -1,14 +1,10 @@
 # SETUP.md - Agent Operating Manual For Agent Kaizen
 
-This is the agent-facing operating manual for this repo - the agent counterpart to the human-facing
-[`README.md`](../README.md). It lives in `setup/`, alongside the bootstrap and helper scripts. The public
-system concept lives in [`Kaizen_System.md`](../Kaizen_System.md). `AGENTS.md` and `CLAUDE.md` (repo root) are
-the compact host instructions that point here.
+This is the agent-facing operating manual for this repo - the agent counterpart to the human-facing [`README.md`](../README.md). It lives in `setup/`, alongside the bootstrap and helper scripts. The public system concept lives in [`Kaizen_System.md`](../Kaizen_System.md). `AGENTS.md` and `CLAUDE.md` (repo root) are the compact host instructions that point here.
 
 ## 1. What This Repo Is
 
-Agent Kaizen is a local implementation of the Kaizen System for improving AI coding-agent work in VS Code
-projects.
+Agent Kaizen is a local implementation of the Kaizen System for improving AI coding-agent work in VS Code projects.
 
 The system loop is:
 
@@ -27,29 +23,65 @@ The local harness is:
 
 The one-file installers and their helper scripts all live in this `setup/` folder:
 
-- Windows: `setup/Install-Agent-Kaizen.cmd` - installs git + Python via winget, sets `DEVROOT`,
-  clones the repo into `DEVROOT\agent-kaizen`, builds the shared venv, generates the VS Code workspace +
-  launcher, scaffolds an empty sibling `SKILLS` store, and initializes the DB.
-- Linux/macOS: `setup/install-agent-kaizen.sh` - installs git + Python via the system package
-  manager, clones the repo, then runs `setup/setup.sh` (which also runs standalone in an already-cloned repo).
-- Skills are optional and ship empty: `setup/link-skills.ps1` / `setup/link-skills.sh` clone a skills store you
-  choose and link it into `.agents/skills` + `.claude/skills`.
+- Windows: `setup/Install-Agent-Kaizen.cmd` - a thin launcher that self-elevates via UAC and relaunches the installer in an **elevated PowerShell window** (automation flags like `-SelfTest` / `-PlanOnly` / `-ListSteps` / `-NoPrompt` run inline instead). That PowerShell window chooses `DEVROOT`, installs git (winget when available, else git-scm.com) and Python (python.org Windows installer into `DEVROOT\Python\Python312`, like the SC installer), offers a developer-tool menu (below), clones the repo into `DEVROOT\agent-kaizen`, builds the shared venv, installs deps (`pyturso`), generates the VS Code workspace + launcher, scaffolds an empty sibling `SKILLS` store, and initializes the DB. winget/appx bootstrap runs entirely in that elevated payload session, registration-first: it runs `Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe` before any download (this alone enables winget in a warm sandbox), and only if that fails does it stage the Windows App Runtime 1.8 framework, retry the same registration, then `Repair-WinGetPackageManager`, then a bundle download as a last resort.
+- Developer tools + Turso: `pyturso` (the DB binding) has no prebuilt Windows wheel, so pip compiles it from source, which needs **Rust + Visual Studio Build Tools**. The installer's tool menu offers Rust + Build Tools up front (default yes) and .NET SDKs / CMake / Node.js / VS Code as optionals installed at the end. Flags: `-WithRust -WithBuildTools -WithDotNet -WithCMake -WithNode -WithVSCode -NoDevTools`. To skip the multi-GB toolchain, provide a prebuilt wheel: drop `pyturso-*.whl` in `DEVROOT\wheels` (or the repo's `wheels\`), or pass `-PyTursoWheelUrl <url>`; the installer uses it (wheel-first) and skips compiling. A successful source build is cached back to `DEVROOT\wheels`. When Build Tools are installed, an `open-agent-kaizen-devshell.cmd` launcher (VS dev env + venv) is written to the repo.
+- Linux/macOS: `setup/install-agent-kaizen.sh` - installs git + Python via the system package manager, clones the repo, then runs `setup/setup.sh` (which also runs standalone in an already-cloned repo).
+- Skills are optional and ship empty: `setup/link-skills.ps1` / `setup/link-skills.sh` clone a skills store you choose and link it into `.agents/skills` + `.claude/skills`.
 - `setup/SetDevRoot.cmd` sets only the `DEVROOT` user environment variable.
+
+Installer UX contract:
+
+- Every step must pre-flight validate (the Verify pillar applied to setup): detect an already-present, valid result and skip its download/install work, so a warm re-run is cheap and side-effect-free. Downloads reuse an already-downloaded valid file; installs check "already installed" before running; generated files are written only when their content changes; env writes only when the value differs. Do work only when validation fails, and re-validate after doing it.
+- Choose or validate `DEVROOT` before tool bootstrap. Do not silently fall back to a system-drive dev root in automation; pass the intended root explicitly.
+- Logs and setup state live under `DEVROOT/agent-kaizen-setup/` (`DEVROOT\agent-kaizen-setup\` on Windows). Native command logs are under `logs/`.
+- Long-running native commands must run through the installer wrappers so users see step `N/M`, overall percent ranges, elapsed time, recent output, and command log paths.
+- Download helpers show bytes downloaded, total bytes and ETA when `Content-Length` exists, and an unknown-total progress line otherwise.
+- A user-skipped step (e.g. a deselected optional tool) must report distinctly as skipped, never as `OK`, so the transcript makes clear what was and was not installed.
+- Any pinned progress banner must be self-cleaning (only the current activity) and non-flashing: reserve a fixed block, redraw it in one pass with full-width line fills (no partial clears), throttle live updates, and degrade gracefully to plain scrolling output on a host without cursor support or under `-NoProgressHeader`.
+- Selectable toolchain installs persist their user `PATH` (and the matching root env var) on both the fresh-install and already-present paths, so an interrupted prior run is repaired on re-run; Node additionally sets an npm global prefix under `DEVROOT` and puts it on `PATH`.
+- Non-live safety modes must not run downloads, package managers, external tools, GUI launches, or user environment writes.
+
+Windows flags:
+
+```powershell
+setup\Install-Agent-Kaizen.cmd X:\dev -ListSteps -NoPause
+setup\Install-Agent-Kaizen.cmd X:\dev -PlanOnly -NoNetwork -NoExternalActions -NoUserEnvWrites -EmitPlanJson X:\dev\agent-kaizen\AI\work\installer-plan.json -NoPause
+setup\Install-Agent-Kaizen.cmd X:\dev -SelfTest -NoNetwork -NoExternalActions -NoUserEnvWrites -NoPause
+```
+
+Linux/macOS flags:
+
+```sh
+bash setup/install-agent-kaizen.sh "$HOME/dev" --list-steps
+bash setup/install-agent-kaizen.sh "$HOME/dev" --plan-only --no-network --no-external-actions --no-user-env-writes --emit-plan-json "$HOME/dev/agent-kaizen/AI/work/installer-plan.json"
+bash setup/install-agent-kaizen.sh "$HOME/dev" --self-test --no-network --no-external-actions --no-user-env-writes --no-input
+```
+
+Optional installers (`install-pytorch`, `install-ollama`, `install-comfyui`, and `link-skills`) follow the same plan/list/self-test/safety flag pattern. Python-based optional installers should prefer the shared venv at `DEVROOT/Python/venvs/kaizen` unless the caller passes an explicit Python override.
+
+Windows Sandbox notes:
+
+- Windows Sandbox is an edge-case test harness. A ready-made, generic template lives at [`AI/tests/windows-sandbox-template.wsb`](../AI/tests/windows-sandbox-template.wsb) — launch it, or adapt its commented `MappedFolder` to test local installer/repo changes.
+- **Disabling Smart App Control in the `.wsb` `LogonCommand` is the key** that lets the installer succeed: recent Windows 11 base images ship SAC in Enforce mode, which silently blocks the per-user Python MSI child and unsigned native modules. The template sets `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState=0` + `CiTool.exe -r` (and disables Defender realtime) at logon. If SAC still shows enabled, close and relaunch the `.wsb` once.
+- Keep sandbox mappings **minimal** — map only a small staging folder (never a whole git repo; junctions and size destabilize the sandbox). The installer clones the repo fresh, so it does not need the repo mapped.
+- Use an explicit writable `DEVROOT`.
+- It is fine for the installer source or repo source to be a read-only mapped folder; writes should go under `DEVROOT`.
+- The winget bootstrap runs in the elevated PowerShell payload session, registration-first: it runs `Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe` before any download, which enables winget when the App Installer's framework dependencies are already staged (a warm sandbox). In a truly fresh sandbox that registration fails (`0x80073CF9`) because the bundle's frameworks (VCLibs `14.0.33519.0`, UI.Xaml, WindowsAppRuntime 1.8) are not staged; the fallback then installs the Windows App Runtime 1.8 redist (`windowsappruntimeinstall`), retries the same registration, and finally downloads Desktop VCLibs + UI.Xaml + the App Installer bundle (`Repair-WinGetPackageManager` is skipped in Sandbox where it fails `0x80070005`). winget is optional: Git and Python have direct-download paths.
+- Python is installed from the python.org Windows installer into `DEVROOT\Python\Python312` (SC's approach: `/quiet InstallAllUsers=0 TargetDir=... PrependPath=0`). Its WiX-burn bootstrapper is run through the job-based runner (so it returns a real exit code, not a 1-second no-op) with `/log`; the diagnostic (`python-install-*.log`) is written under the setup `logs/` folder and mirrored by `AK_LOG_MIRROR`. The shared venv is built from it at `DEVROOT\Python\venvs\kaizen`.
+- `pyturso` has no prebuilt Windows wheel, so pip compiles it from source (needs Rust + Build Tools; see the developer-tool note above). Smart App Control Enforce may block unsigned binaries; the installer detects and warns about SAC in preflight but does not halt.
+- Set `AK_LOG_MIRROR` (or map a writable `C:\ak-logs` in the `.wsb`) to copy the setup logs out of the ephemeral sandbox before it closes.
 
 Human-facing install steps are in the repo [`README.md`](../README.md).
 
 ## 3. Session Start
 
-For non-trivial work, run or request the current private policy context first - the same command for Claude Code
-and Codex:
+For non-trivial work, run or request the current private policy context first - the same command for Claude Code and Codex:
 
 ```powershell
 python kaizen.py X5 --json
 ```
 
-The policy DB ships empty; it returns only the rules you have added with `X1`. Reload this context after
-conversation compaction. Before every major task, remind the user to compact or start a continuation when the
-context window is getting heavy.
+The policy DB ships empty; it returns only the rules you have added with `X1`. Reload this context after conversation compaction. Before every major task, remind the user to compact or start a continuation when the context window is getting heavy.
 
 Then check the DB and load the session digest:
 
@@ -58,10 +90,7 @@ python kaizen.py K1 --json
 python kaizen.py R0 --json
 ```
 
-`R0` is the read-back half of Manage: one small JSON payload with active policy, open GOTCHAs,
-blocking verification conclusions (`VERIFICATION_FAILED`, `NEEDS_HUMAN_DECISION`), recent LEARNED
-lessons, and active tasks — so a session starts from records instead of chat memory. Reload `X5`
-and `R0` after compaction.
+`R0` is the read-back half of Manage: one small JSON payload with active policy, open GOTCHAs, blocking verification conclusions (`VERIFICATION_FAILED`, `NEEDS_HUMAN_DECISION`), recent LEARNED lessons, and active tasks — so a session starts from records instead of chat memory. Reload `X5` and `R0` after compaction.
 
 ## 4. Core Rule
 
@@ -83,8 +112,7 @@ Use:
 python kaizen.py <operation> --json
 ```
 
-The shared venv is `$DEVROOT/Python/venvs/kaizen` (created by the setup script); a repo-local `.venv` also
-works as a fallback. Dependency pins are in `requirements-kaizen.txt`.
+The shared venv is `$DEVROOT/Python/venvs/kaizen` (created by the setup script); a repo-local `.venv` also works as a fallback. Dependency pins are in `requirements-kaizen.txt`.
 
 Command families:
 
@@ -105,11 +133,9 @@ Command families:
 - `Y*` generative runs (ComfyUI)
 - `B*` model/embedding backends (Ollama)
 
-Use `--help` for the approved operation list. Short codes and named aliases are equivalent. Do not invent
-operation codes or flags during task work.
+Use `--help` for the approved operation list. Short codes and named aliases are equivalent. Do not invent operation codes or flags during task work.
 
-JSON-valued args and shell quoting differ per shell. The file fallback always works; inline forms
-vary:
+JSON-valued args and shell quoting differ per shell. The file fallback always works; inline forms vary:
 
 | Shell                  | Inline JSON that survives argv                          | Safest form   |
 | ---------------------- | ------------------------------------------------------- | ------------- |
@@ -118,9 +144,7 @@ vary:
 | bash / zsh             | `--payload-json '{"task":"summarize"}'` (single-quoted) | either        |
 | cmd.exe                | `--payload-json "{\"task\":\"summarize\"}"` (escaped)   | `*-file` flag |
 
-Every JSON flag has a file twin for when quoting fights back: `--payload-json-file`,
-`--summary-file`, `--body-file`, `--evidence-file`, `--findings-file`, `--remedies-file`,
-`--artifact-ids-file`, `--expected-json-file`.
+Every JSON flag has a file twin for when quoting fights back: `--payload-json-file`, `--summary-file`, `--body-file`, `--evidence-file`, `--findings-file`, `--remedies-file`, `--artifact-ids-file`, `--expected-json-file`.
 
 ## 6. Work Locations
 
@@ -133,30 +157,23 @@ Every JSON flag has a file twin for when quoting fights back: `--payload-json-fi
 - Helper scripts scratch: `AI/support_scripts_work/`.
 - Root eval fixtures and learning command stubs: `evals/`.
 
-For public repositories, keep `AI/db/` contents private/local unless explicitly sanitized. Private repositories
-may choose to track DB data deliberately.
+For public repositories, keep `AI/db/` contents private/local unless explicitly sanitized. Private repositories may choose to track DB data deliberately.
 
-`AI/work/build-ledger.md` remains a local continuity export during the transition. Update it after major
-milestones until DB-backed ledger reporting fully replaces it.
+`AI/work/build-ledger.md` remains a local continuity export during the transition. Update it after major milestones until DB-backed ledger reporting fully replaces it.
 
 ## 7. SAVMI Workflow
 
 For substantial work use [`Kaizen_System.md`](../Kaizen_System.md):
 
-1. **Scope**: research the system, interview the user when needed, define assumptions, scope, and acceptance
-   criteria.
+1. **Scope**: research the system, interview the user when needed, define assumptions, scope, and acceptance criteria.
 2. **Adapt**: create the execution contract, use allowed capabilities, and make bounded changes.
 3. **Verify**: run deterministic checks first; use structured synthesis only where judgment is needed.
 4. **Manage**: record tasks, plans, proof, artifacts, source locks, learning records, ingested evidence, activity traces, eval scores, and reports.
 5. **Improve**: review managed evidence and feed better priorities into the next Scope cycle.
 
-Use `W1`/`W3` for tasks and plans when work is substantial. Use `Q*` and `A*` for proof, verifier findings, eval
-runs, anti-patterns, and artifacts. Use `G*` and `L*` for the GOTCHA -> LEARNING -> LEARNED lifecycle. Use `E*`
-to ingest external evidence, `T*` to record traces and eval scores, and `O*` for the improvement lab.
+Use `W1`/`W3` for tasks and plans when work is substantial. Use `Q*` and `A*` for proof, verifier findings, eval runs, anti-patterns, and artifacts. Use `G*` and `L*` for the GOTCHA -> LEARNING -> LEARNED lifecycle. Use `E*` to ingest external evidence, `T*` to record traces and eval scores, and `O*` for the improvement lab.
 
-Read records back, not just in: `R0` (session digest), `L10` (LEARNED lessons with their
-GOTCHA -> LEARNING chain), `Q9` (verification conclusions by task/conclusion/severity), and `T4`
-(eval scores with aggregates) pull past work into the current session cheaply.
+Read records back, not just in: `R0` (session digest), `L10` (LEARNED lessons with their GOTCHA -> LEARNING chain), `Q9` (verification conclusions by task/conclusion/severity), and `T4` (eval scores with aggregates) pull past work into the current session cheaply.
 
 ### Durability triage
 
@@ -181,9 +198,7 @@ python kaizen.py E4 --query "retry budget" --json
 python kaizen.py E5 --id DOC_ID_FROM_E1 --json
 ```
 
-`E3` chunks deterministically (add `--chunker semantic` with an embedding backend); `E4` is
-lexical by default and vector-ranked with `--semantic` once chunks are embedded (`B3` backfills).
-Lock external sources with `S1` first when provenance matters.
+`E3` chunks deterministically (add `--chunker semantic` with an embedding backend); `E4` is lexical by default and vector-ranked with `--semantic` once chunks are embedded (`B3` backfills). Lock external sources with `S1` first when provenance matters.
 
 ### Private Policy Walkthrough
 
@@ -194,14 +209,11 @@ python kaizen.py X1 --title "User-owned commits" --trigger session-start --prior
 python kaizen.py X5 --json
 ```
 
-`X5` (and `R0`) return active rules sorted by priority; `--trigger` labels when a rule applies
-(`session-start` rules always load).
+`X5` (and `R0`) return active rules sorted by priority; `--trigger` labels when a rule applies (`session-start` rules always load).
 
 ## 8. Skills
 
-Skills live in the external skills store and are surfaced through `.agents/skills` and `.claude/skills`. The
-public repo ships with no skills; add your own store with `setup/link-skills.ps1` / `setup/link-skills.sh`. Use
-the host skill loader when a task matches a skill trigger. Edit the canonical skill store, not a copied mirror.
+Skills live in the external skills store and are surfaced through `.agents/skills` and `.claude/skills`. The public repo ships with no skills; add your own store with `setup/link-skills.ps1` / `setup/link-skills.sh`. Use the host skill loader when a task matches a skill trigger. Edit the canonical skill store, not a copied mirror.
 
 Skills and scripts can support all SAVMI layers:
 
@@ -231,13 +243,11 @@ Before reporting success:
 - record proof artifacts and hashes where practical;
 - say what passed, failed, and was not run.
 
-Known caveat: running a repo-wide formatter can hit unrelated local scratch. Prefer targeted checks on the
-Markdown you changed.
+Known caveat: running a repo-wide formatter can hit unrelated local scratch. Prefer targeted checks on the Markdown you changed.
 
 ## 10. Public Surfaces
 
-Tracked public docs should explain the portable system and local harness, not private machine policy. Private
-policy context belongs in the local data plane and is loaded through `X5`.
+Tracked public docs should explain the portable system and local harness, not private machine policy. Private policy context belongs in the local data plane and is loaded through `X5`.
 
 Before preparing public output, inspect:
 

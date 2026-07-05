@@ -1,10 +1,8 @@
 # Agent Kaizen Evals
 
-This folder is the portable fixture surface for project-level evals and DB-backed learning command
-stubs.
+This folder is the portable fixture surface for project-level evals and DB-backed learning command stubs.
 
-Kaizen DB records own eval metadata and run history. Files here should be portable inputs, schemas, or
-fixtures that a verifier can execute or inspect.
+Kaizen DB records own eval metadata and run history. Files here should be portable inputs, schemas, or fixtures that a verifier can execute or inspect.
 
 Use:
 
@@ -30,10 +28,7 @@ Learning command stubs:
 
 ## Seed cases
 
-Eight behavioral eval cases that seed the improvement lab (`O1` assembles case sets from
-`eval_cases` + LEARNED exemplars + active GOTCHAs). They encode the judgment calls the harness
-depends on: when a record is warranted, where it routes, and what the promotion gate protects.
-Run once per data plane; each command is copy-paste runnable.
+Eight behavioral eval cases that seed the improvement lab (`O1` assembles case sets from `eval_cases` + LEARNED exemplars + active GOTCHAs). They encode the judgment calls the harness depends on: when a record is warranted, where it routes, and what the promotion gate protects. Run once per data plane; each command is copy-paste runnable.
 
 ```sh
 python kaizen.py Q3 --category trigger --title "Should trigger G1: mid-task failure with evidence" --summary "A reproducible failure with evidence surfaced during task work should be recorded as a GOTCHA." --body "Agent hits a reproducible error twice while implementing a feature and has the command output. Expected: G1 with the evidence in the body. Not expected: silently working around it or leaving it in chat only." --expected-json '{"expected_op":"G1"}' --json

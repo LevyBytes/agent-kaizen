@@ -24,6 +24,7 @@ from .hashing import file_sha256, utc_text_hash, validate_text_fields
 from .paths import path_in_repo, repo_relative, resolve_user_path
 from .schemas import KAIZEN_ENUMS, validate_record
 from .task_records import _text_arg
+from .text_search import like_pattern
 
 
 _MEDIA = {
@@ -230,11 +231,6 @@ def _recursive_chunk(text: str, max_chars: int = 1024) -> list[tuple[str, int, i
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
-
-
-def _escape_like(query: str) -> str:
-    """Escape LIKE wildcards so a literal % or _ in the query cannot over-match."""
-    return query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _split_segments(text: str) -> list[tuple[str, int]]:
@@ -663,7 +659,7 @@ def query_evidence(args: Any) -> dict[str, Any]:
         except Exception:
             rows = None
     if rows is None:
-        pattern = f"%{_escape_like(query)}%"
+        pattern = like_pattern(query)
         rows = fetch_all(
             "SELECT id, document_id, source_lock_id, context, neighbor_prev_id, neighbor_next_id, "
             "substr(text, 1, 240), 0 FROM evidence_chunks WHERE text LIKE ? ESCAPE '\\' "

@@ -12,6 +12,7 @@ from .denials import KaizenDenied, remedy_example, usage_denial
 from .hashing import file_sha256, utc_text_hash, validate_text_fields
 from .output import emit, emit_error
 from .paths import EXPORT_ROOT, REPO_ROOT, read_text_file, repo_relative
+from .text_search import like_pattern
 from .plan_records import add_plan, revise_plan
 from .policy_records import add_policy, inspect_policy, list_policies, query_policies, session_context
 from .proof_artifacts import (
@@ -751,10 +752,11 @@ def source_add(args: argparse.Namespace) -> dict[str, Any]:
 
 def source_query(args: argparse.Namespace) -> dict[str, Any]:
     query = args.query or ""
-    pattern = f"%{query}%"
+    pattern = like_pattern(query)
     rows = db.fetch_all(
         "SELECT id, source_id, authority_tier, url_or_repository, version_or_commit, summary FROM source_locks "
-        "WHERE source_id LIKE ? OR url_or_repository LIKE ? OR summary LIKE ? ORDER BY created_at DESC LIMIT ?",
+        "WHERE source_id LIKE ? ESCAPE '\\' OR url_or_repository LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' "
+        "ORDER BY created_at DESC LIMIT ?",
         (pattern, pattern, pattern, args.limit or 20),
     )
     return {

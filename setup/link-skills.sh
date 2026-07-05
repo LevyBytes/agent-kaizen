@@ -1,69 +1,115 @@
 #!/usr/bin/env bash
-# ============================================================================
-#  link-skills.sh  --  populate the SKILLS store and link skills (Linux/macOS)
-# ----------------------------------------------------------------------------
-#  The public repo ships with NO skills. This helper optionally clones a skills
-#  store into $DEVROOT/SKILLS, then creates a per-skill SYMLINK for every skill
-#  (a folder containing SKILL.md) under $DEVROOT/SKILLS/skills/<name> into BOTH
-#  .agents/skills/<name> and .claude/skills/<name>. Re-running is safe.
-#
-#  Usage:
-#    bash setup/link-skills.sh [skills-store-git-url]
-#
-#  Expected store layout: $DEVROOT/SKILLS/skills/<skill-name>/SKILL.md
-#  Public repo: https://github.com/LevyBytes/agent-kaizen
-# ============================================================================
+# Populate the SKILLS store and link skills into .agents and .claude mirrors.
 set -euo pipefail
+
+STORE_URL=""
+DEVROOT_ARG=""
+PYTHON_EXE=""
+LIST_STEPS=0
+EMIT_PLAN_JSON=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --store-url) STORE_URL="${2:-}"; shift ;;
+    --devroot) DEVROOT_ARG="${2:-}"; shift ;;
+    --python-exe) PYTHON_EXE="${2:-}"; shift ;;
+    --list-steps) LIST_STEPS=1 ;;
+    --emit-plan-json) EMIT_PLAN_JSON="${2:-}"; shift ;;
+    --plan-only) AK_PLAN_ONLY=1 ;;
+    --self-test) AK_SELF_TEST=1 ;;
+    --no-progress) AK_NO_PROGRESS=1 ;;
+    --no-network) AK_NO_NETWORK=1 ;;
+    --no-external-actions) AK_NO_EXTERNAL=1 ;;
+    --no-user-env-writes) AK_NO_USER_ENV=1 ;;
+    --assume-yes) AK_ASSUME_YES=1 ;;
+    --no-input) AK_NO_INPUT=1 ;;
+    -* ) printf 'unknown arg: %s\n' "$1" >&2; exit 2 ;;
+    * ) if [ -z "$STORE_URL" ]; then STORE_URL="$1"; else printf 'unexpected arg: %s\n' "$1" >&2; exit 2; fi ;;
+  esac
+  shift
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-STORE_URL="${1:-}"
-DEVROOT="${DEVROOT:-$(cd "$REPO_ROOT/.." && pwd)}"
-STORE="$DEVROOT/SKILLS"
+if [ "$LIST_STEPS" -eq 1 ]; then AK_PLAN_ONLY=1; fi
+# shellcheck source=setup/installer-common.sh
+source "$SCRIPT_DIR/installer-common.sh"
+
+DEVROOT_RESOLVED="$(ak_resolve_devroot "$DEVROOT_ARG" "$REPO_ROOT")"
+STORE="$DEVROOT_RESOLVED/SKILLS"
 SKILLS_DIR="$STORE/skills"
 
-echo "=== Agent Kaizen: link skills ==="
-echo "  DEVROOT : $DEVROOT"
-echo "  store   : $STORE"
+ak_init "Agent Kaizen skill linker" "$REPO_ROOT" "$DEVROOT_RESOLVED" \
+  "$(ak_step_obj preflight 'Resolve store paths and validate inputs')" \
+  "$(ak_step_obj store 'Clone or update optional skills store')" \
+  "$(ak_step_obj links 'Create .agents and .claude skill links')" \
+  "$(ak_step_obj index 'Regenerate skill index when skill-drafting is available')"
 
-# 1. Optionally clone or update the skills store.
-if [ -n "$STORE_URL" ]; then
-  if [ -d "$STORE/.git" ]; then
-    echo "  Updating existing store (git pull)..."
-    git -C "$STORE" pull --ff-only || echo "  [warn] git pull did not fast-forward; leaving store as-is."
-  else
-    skills_real="$([ -d "$SKILLS_DIR" ] && ls -A "$SKILLS_DIR" 2>/dev/null | grep -v '^\.gitkeep$' || true)"
-    root_real="$([ -d "$STORE" ] && ls -A "$STORE" 2>/dev/null | grep -vE '^(\.gitkeep|skills|\.git)$' || true)"
-    if [ -n "$skills_real" ] || [ -n "$root_real" ]; then
-      echo "ERROR: SKILLS already has content at $STORE; manage it manually."; exit 1
-    fi
-    [ -e "$STORE" ] && rm -rf "$STORE"
-    git clone "$STORE_URL" "$STORE"
+if [ "$LIST_STEPS" -eq 1 ] || [ "$AK_PLAN_ONLY" -eq 1 ]; then
+  ak_show_plan
+  [ -z "$EMIT_PLAN_JSON" ] || ak_write_plan_json "$EMIT_PLAN_JSON"
+  exit 0
+fi
+[ "$AK_SELF_TEST" -eq 0 ] || ak_show_plan
+
+step_preflight() {
+  printf 'DEVROOT : %s\n' "$DEVROOT_RESOLVED"
+  printf 'RepoRoot: %s\n' "$REPO_ROOT"
+  printf 'Store   : %s\n' "$STORE"
+  if [ -z "$STORE_URL" ] && [ ! -d "$SKILLS_DIR" ]; then
+    ak_die "No skills found at $SKILLS_DIR. Pass a store URL or populate the store first."
   fi
-fi
+}
 
-[ -d "$SKILLS_DIR" ] || { echo "ERROR: no skills at $SKILLS_DIR; pass a store URL or populate it first."; exit 1; }
+step_store() {
+  if [ -z "$STORE_URL" ]; then
+    printf 'No store URL supplied; using the existing local store.\n'
+    return
+  fi
+  ak_assert_network_allowed "$STORE_URL"
+  command -v git >/dev/null 2>&1 || ak_die "git not found on PATH."
+  if [ -d "$STORE/.git" ]; then
+    ak_run --note "Updating existing skills store with git pull --ff-only." -- git -C "$STORE" pull --ff-only
+  else
+    skills_real="$([ -d "$SKILLS_DIR" ] && find "$SKILLS_DIR" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print -quit 2>/dev/null || true)"
+    root_real="$([ -d "$STORE" ] && find "$STORE" -mindepth 1 -maxdepth 1 ! -name .gitkeep ! -name skills -print -quit 2>/dev/null || true)"
+    if [ -n "$skills_real" ] || [ -n "$root_real" ]; then
+      ak_die "SKILLS already has content at $STORE; manage it manually instead of cloning over it."
+    fi
+    mkdir -p "$STORE"
+    ak_run --note "Cloning the selected skills store." -- git clone "$STORE_URL" "$STORE"
+  fi
+}
 
-# 2. Link every skill (a folder containing SKILL.md) into both mirrors.
-linked=0
-for d in "$SKILLS_DIR"/*/; do
-  [ -f "${d}SKILL.md" ] || continue
-  name="$(basename "$d")"
-  for m in "$REPO_ROOT/.agents/skills" "$REPO_ROOT/.claude/skills"; do
-    mkdir -p "$m"
-    [ -e "$m/$name" ] || ln -s "${d%/}" "$m/$name"
+step_links() {
+  [ -d "$SKILLS_DIR" ] || ak_die "No skills found at $SKILLS_DIR. Pass a store URL or populate it first."
+  local linked=0
+  local d name m
+  for d in "$SKILLS_DIR"/*/; do
+    [ -f "${d}SKILL.md" ] || continue
+    name="$(basename "$d")"
+    for m in "$REPO_ROOT/.agents/skills" "$REPO_ROOT/.claude/skills"; do
+      mkdir -p "$m"
+      [ -e "$m/$name" ] || ln -s "${d%/}" "$m/$name"
+    done
+    linked=$((linked + 1))
+    printf 'linked: %s\n' "$name"
   done
-  linked=$((linked + 1))
-  echo "  linked: $name"
-done
-echo "  $linked skill(s) linked into .agents/skills and .claude/skills."
+  printf '%d skill(s) linked into .agents/skills and .claude/skills.\n' "$linked"
+}
 
-# 3. Best-effort: regenerate INDEX.md if the store carries skill-drafting.
-BUILDER="$SKILLS_DIR/skill-drafting/scripts/skill_builder.py"
-if [ -f "$BUILDER" ]; then
-  PY="$DEVROOT/Python/venvs/kaizen/bin/python"
-  [ -x "$PY" ] || PY="python3"
-  "$PY" "$BUILDER" index "$REPO_ROOT/.claude/skills" --mirror "$REPO_ROOT/.agents/skills" || true
-else
-  echo "  (INDEX.md not regenerated: skill-drafting/scripts/skill_builder.py not found in the store.)"
-fi
+step_index() {
+  BUILDER="$SKILLS_DIR/skill-drafting/scripts/skill_builder.py"
+  if [ ! -f "$BUILDER" ]; then
+    printf 'INDEX.md not regenerated: skill-drafting/scripts/skill_builder.py not found in the store.\n'
+    return
+  fi
+  PY="$(ak_resolve_python "$PYTHON_EXE" "$DEVROOT_RESOLVED")"
+  [ -n "$PY" ] || ak_die "python not found; run the core installer first or pass --python-exe"
+  ak_run --note "Regenerating skill index files from the linked skill store." -- "$PY" "$BUILDER" index "$REPO_ROOT/.claude/skills" --mirror "$REPO_ROOT/.agents/skills"
+}
+
+ak_run_step preflight 'Resolve store paths and validate inputs' step_preflight
+ak_run_step store 'Clone or update optional skills store' step_store
+ak_run_step links 'Create .agents and .claude skill links' step_links
+ak_run_step index 'Regenerate skill index when skill-drafting is available' step_index

@@ -21,8 +21,9 @@ RUNTIME_ROOT = WORK_ROOT / "kaizen-runtime"
 RUNTIME_TMP = RUNTIME_ROOT / "tmp"
 EXPORT_ROOT = DB_ROOT / "exports"
 MANIFEST_ROOT = DB_ROOT / "manifests"
-# Generated assets (e.g. ComfyUI outputs). Under AI/ so AI/.gitignore's `*` keeps binaries out of git.
-GENERATED_ROOT = AI_ROOT / "generated"
+# Generated assets (e.g. ComfyUI outputs). `AI/generation/` is whitelisted in AI/.gitignore and has its
+# own .gitignore, so the folder stays in the repo tree while its binary contents are ignored.
+GENERATED_ROOT = AI_ROOT / "generation"
 
 
 def ensure_runtime_dirs() -> None:

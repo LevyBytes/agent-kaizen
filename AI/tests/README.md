@@ -1,6 +1,6 @@
 # AI/tests/
 
-Automated tests for the Agent Kaizen harness — 243 tests across 27 modules. Standard-library
+Automated tests for the Agent Kaizen harness — 249 tests across 28 modules. Standard-library
 `unittest` only — no extra dependencies beyond the pinned runtime in `requirements-kaizen.txt`.
 (A handful of PDF-guard tests skip unless the opt-in `requirements-docs.txt` backends are installed.)
 
@@ -41,8 +41,11 @@ Tests invoke `sys.executable`, so run them with the project venv's Python (the o
   `K1 --integrity` cross-table orphan scan (clean DB and a seeded orphan).
 - `test_input_hardening.py` — the unified repo-only path policy (`E1`/`A2` deny outside-repo paths;
   `--allow-external` stores a sanitized `external:` origin), the UTF-8 decode denial on `--*-file`
-  inputs, LIKE wildcard escaping in lexical search, and the PDF ingestion guards
+  inputs, LIKE wildcard escaping in evidence search, and the PDF ingestion guards
   (size/pages/encrypted/no-text; pypdf-dependent cases skip when the docs backend is absent).
+- `test_search_escaping.py` — the shared `text_search.like_pattern` helper plus record-plane escaping:
+  a literal `_`/`%` in a query matches literally (not as a wildcard) across `G3`/`L5`/`X3`/`S2`/`Q9`,
+  the surfaces that route through the same `LIKE ? ESCAPE '\'` path as evidence search.
 - `test_db_retry.py` — retry-vocabulary/backoff unit tests plus a 4-process concurrent `K1` race
   regression against one shared data plane.
 - `test_learning_ops.py` — the full L\* lifecycle: adds, `L2`/`L3` promotion linkage

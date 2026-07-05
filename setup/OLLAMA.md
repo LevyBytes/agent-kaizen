@@ -1,59 +1,62 @@
-# Ollama model backend (B\* / `model-*`)
+# Ollama Model Backend
 
-An **optional, opt-in** model backend that speaks the **OpenAI-compatible** API — a local Ollama
-server by default, or any remote OpenAI-compatible endpoint by configuration. It provides two
-capabilities:
+Ollama is an optional local model backend for `B*` / `model-*` operations. It can provide:
 
-- **Embeddings** (the payoff): light up `E3` (store an embedding per chunk) and `E4 --semantic`
-  (Turso-native vector search via `vector_distance_cos`). `B3 reembed` backfills existing chunks.
-- **Advisory text** (`B2 model-run`): triage / summarize / classify, recorded as a `model_call`
-  trace. **Advisory only** — never the final acceptance authority unless a deterministic verifier
-  confirms.
+- embeddings for `E3` chunk embeddings and `E4 --semantic`;
+- advisory text via `B2 model-run`.
 
-With nothing configured the harness is unchanged: deterministic recursive chunking + lexical search,
-no network. API keys are read from the environment **only** and are never stored.
+With nothing configured, the harness stays deterministic and local: recursive chunking plus lexical search, no model network calls.
 
 ## Install
 
-1. Install Ollama from <https://ollama.com/download> (it runs as a local service on `:11434`).
-2. Run the helper (relocates the model store under `$DEVROOT`, pulls an embed + chat model):
+1. Install Ollama from <https://ollama.com/download>.
+2. Pull the default Agent Kaizen models with the helper:
 
-   ```powershell
-   setup\install-ollama.ps1            # Windows
-   ```
+```powershell
+setup\install-ollama.ps1
+```
 
-   ```bash
-   bash setup/install-ollama.sh        # macOS / Linux
-   ```
+```sh
+bash setup/install-ollama.sh
+```
 
-   It points `OLLAMA_MODELS` at `$DEVROOT/Ollama/models` so weights live outside the repo
-   (workspace-visible, never tracked by git).
+The helper points `OLLAMA_MODELS` at `$DEVROOT/Ollama/models`, so weights live outside the repo.
 
-## Configure (opt-in)
+## Dry Runs
 
-Tell Kaizen which models to use (a backend activates **only** when its model is set):
+```powershell
+setup\install-ollama.ps1 -ListSteps
+setup\install-ollama.ps1 -PlanOnly -NoNetwork -NoExternalActions -NoUserEnvWrites
+setup\install-ollama.ps1 -SelfTest -NoNetwork -NoExternalActions -NoUserEnvWrites
+```
+
+```sh
+bash setup/install-ollama.sh --list-steps
+bash setup/install-ollama.sh --plan-only --no-network --no-external-actions --no-user-env-writes
+bash setup/install-ollama.sh --self-test --no-network --no-external-actions --no-user-env-writes
+```
+
+Command logs and setup state live under `$DEVROOT/agent-kaizen-setup/`.
+
+## Configure
 
 ```text
-KAIZEN_EMBED_MODEL = nomic-embed-text          # enables E3 embeddings + E4 --semantic
-KAIZEN_LLM_MODEL   = llama3.2                   # enables B2 model-run
-# Remote OpenAI-compatible endpoint (optional; local Ollama /v1 is the default):
-KAIZEN_EMBED_BASE_URL / KAIZEN_LLM_BASE_URL     # e.g. https://api.example.com/v1
-KAIZEN_EMBED_API_KEY  / KAIZEN_LLM_API_KEY      # env only, never stored
+KAIZEN_EMBED_MODEL=nomic-embed-text
+KAIZEN_LLM_MODEL=llama3.2
+KAIZEN_EMBED_BASE_URL=http://127.0.0.1:11434/v1
+KAIZEN_LLM_BASE_URL=http://127.0.0.1:11434/v1
 ```
 
-One embedding model per corpus — `vector_distance_cos` needs a consistent dimension. Switching the
-embed model requires a re-embed (`B3 reembed`).
+Remote OpenAI-compatible endpoints can be used by setting the corresponding `*_BASE_URL` and `*_API_KEY` environment variables. API keys are read from the environment only and are never stored.
 
-## Verify + use
+One embedding model should be used per corpus because vector dimensions must stay consistent. Switching models requires `B3 reembed`.
 
-```bash
-python kaizen.py B1 --json                       # model-doctor: configured? reachable? dimension?
-python kaizen.py E1 --path notes.md --json       # ingest
-python kaizen.py E3 --id <doc-id> --json         # chunk -> chunks now carry an embedding
-python kaizen.py E4 --query "..." --semantic --json   # nearest chunks by cosine (else lexical)
-python kaizen.py B3 --json                        # backfill embeddings for existing chunks
-python kaizen.py B2 --prompt "Summarize ..." --json   # advisory text -> a model_call trace
+## Verify
+
+```powershell
+python kaizen.py B1 --json
+python kaizen.py E3 --id <doc-id> --json
+python kaizen.py E4 --query "..." --semantic --json
+python kaizen.py B3 --json
+python kaizen.py B2 --prompt "Summarize ..." --json
 ```
-
-`E4 --semantic` falls back to the lexical baseline when no embeddings are stored yet; run `E3`
-(after configuring an embed model) or `B3 reembed` to populate them.

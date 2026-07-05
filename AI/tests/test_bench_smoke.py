@@ -16,6 +16,10 @@ from _harness import REPO_ROOT
 
 BENCH = REPO_ROOT / "support_scripts" / "bench_kaizen.py"
 
+# bench_kaizen imports the engine lazily (inside main), so importing it here is side-effect-free.
+sys.path.insert(0, str(REPO_ROOT / "support_scripts"))
+from bench_kaizen import replace_heading_section  # noqa: E402
+
 
 def _sha(path: Path) -> str | None:
     if not path.exists():
@@ -58,11 +62,13 @@ class BenchSmokeTest(unittest.TestCase):
         md = (out_dir / "BENCHMARKS.md").read_text(encoding="utf-8")
         self.assertIn("xychart-beta", md)
         section = (out_dir / "readme-section.md").read_text(encoding="utf-8")
-        self.assertIn("<!-- BENCHMARKS:BEGIN -->", section)
-        self.assertIn("<!-- BENCHMARKS:END -->", section)
+        # Heading-delimited (no marker comments): the section IS the `## Benchmarks` heading.
+        self.assertEqual(section.splitlines()[0], "## Benchmarks", section[:40])
+        self.assertNotIn("<!--", section)
         self.assertIn("docs/images/bench-write-latency.svg", section)
         teaser = (out_dir / "teaser-section.md").read_text(encoding="utf-8")
-        self.assertIn("<!-- BENCH-TEASER:BEGIN -->", teaser)
+        self.assertEqual(teaser.splitlines()[0], "## Benchmarks Preview", teaser[:40])
+        self.assertNotIn("<!--", teaser)
         self.assertIn("[Benchmarks](#benchmarks)", teaser)
         svg = (out_dir / "bench-write-latency.svg").read_text(encoding="utf-8")
         self.assertIn("<svg", svg)
@@ -77,6 +83,52 @@ class BenchSmokeTest(unittest.TestCase):
         # so one-or-more matches both raw and escaped forms).
         self.assertIsNone(re.search(r"[A-Za-z]:\\+Users", raw), "Windows home path leaked")
         self.assertNotIn("/home/", raw)
+
+
+class ReplaceHeadingSectionTest(unittest.TestCase):
+    """The heading-delimited README injector (replaces marker-comment regions)."""
+
+    def _write(self, text: str) -> Path:
+        d = Path(tempfile.mkdtemp(prefix="kaizen-heading-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        p = d / "README.md"
+        p.write_text(text, encoding="utf-8", newline="\n")
+        return p
+
+    def test_replaces_section_up_to_next_heading(self):
+        p = self._write("# Title\n\nintro\n\n## Benchmarks Preview\n\nold teaser\n\n## Contents\n\n- toc\n")
+        replace_heading_section(p, "## Benchmarks Preview", "## Benchmarks Preview\n\nNEW teaser")
+        out = p.read_text(encoding="utf-8")
+        self.assertIn("## Benchmarks Preview\n\nNEW teaser\n", out)
+        self.assertNotIn("old teaser", out)
+        self.assertIn("## Contents\n\n- toc\n", out)  # following section preserved
+        self.assertNotIn("<!--", out)
+
+    def test_exact_match_avoids_prefix_collision(self):
+        # `## Benchmarks` must target the full section, NOT the earlier `## Benchmarks Preview`.
+        p = self._write(
+            "## Benchmarks Preview\n\nteaser stays\n\n## Contents\n\n- toc\n\n"
+            "## Benchmarks\n\nold full section\n\n## Daily Workflow\n\nwork\n"
+        )
+        replace_heading_section(p, "## Benchmarks", "## Benchmarks\n\nNEW full section")
+        out = p.read_text(encoding="utf-8")
+        self.assertIn("teaser stays", out)  # preview untouched
+        self.assertIn("## Benchmarks\n\nNEW full section\n", out)
+        self.assertNotIn("old full section", out)
+        self.assertIn("## Daily Workflow\n\nwork\n", out)  # following section preserved
+
+    def test_deeper_subheading_stays_content(self):
+        p = self._write("## Benchmarks\n\nintro\n\n### Sub\n\ndetail\n\n## Next\n\nafter\n")
+        replace_heading_section(p, "## Benchmarks", "## Benchmarks\n\nREPLACED")
+        out = p.read_text(encoding="utf-8")
+        self.assertNotIn("### Sub", out)  # the H3 was inside the replaced section
+        self.assertIn("## Next\n\nafter\n", out)
+
+    def test_missing_heading_exits_nonzero(self):
+        p = self._write("# Title\n\nno benchmarks here\n")
+        with self.assertRaises(SystemExit) as ctx:
+            replace_heading_section(p, "## Benchmarks", "## Benchmarks\n\nx")
+        self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":

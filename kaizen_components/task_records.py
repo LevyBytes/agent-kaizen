@@ -8,6 +8,7 @@ from .db import fetch_all, fetch_one, new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import utc_text_hash, validate_text_fields
 from .paths import read_text_file
+from .text_search import like_pattern
 from .schemas import has_schema, validate_record
 
 
@@ -200,10 +201,11 @@ def query_records(table: str, args: Any) -> dict[str, Any]:
     query = getattr(args, "query", None) or ""
     if not query:
         raise KaizenDenied("DENIED_QUERY_REQUIRED", {"required_action": "resubmit with --query"}, exit_code=2)
-    pattern = f"%{query}%"
+    pattern = like_pattern(query)
     rows = fetch_all(
         f"SELECT id, status, scope, title, summary, created_at FROM {table} "
-        "WHERE title LIKE ? OR summary LIKE ? OR body LIKE ? ORDER BY created_at DESC LIMIT ?",
+        "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' "
+        "ORDER BY created_at DESC LIMIT ?",
         (pattern, pattern, pattern, int(getattr(args, "limit", None) or 20)),
     )
     records = [
@@ -316,10 +318,11 @@ def learned_context(args: Any) -> dict[str, Any]:
     query = getattr(args, "query", None)
     limit = int(getattr(args, "limit", None) or 10)
     if query:
-        pattern = f"%{query}%"
+        pattern = like_pattern(query)
         rows = fetch_all(
             "SELECT id, title, summary, created_at, source_learning_id FROM learned "
-            "WHERE title LIKE ? OR summary LIKE ? OR body LIKE ? ORDER BY created_at DESC LIMIT ?",
+            "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' "
+        "ORDER BY created_at DESC LIMIT ?",
             (pattern, pattern, pattern, limit),
         )
     else:

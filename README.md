@@ -4,39 +4,23 @@
 
 # Agent Kaizen
 
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Tests](https://github.com/LevyBytes/agent-kaizen/actions/workflows/tests.yml/badge.svg)](https://github.com/LevyBytes/agent-kaizen/actions/workflows/tests.yml)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20PowerShell%20%C2%B7%20portable%20core-informational.svg)](#setup)
-[![GitHub](https://img.shields.io/badge/GitHub-LevyBytes%2Fagent--kaizen-181717?logo=github)](https://github.com/LevyBytes/agent-kaizen)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE) [![Tests](https://github.com/LevyBytes/agent-kaizen/actions/workflows/tests.yml/badge.svg)](https://github.com/LevyBytes/agent-kaizen/actions/workflows/tests.yml) [![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20PowerShell%20%C2%B7%20portable%20core-informational.svg)](#setup) [![GitHub](https://img.shields.io/badge/GitHub-LevyBytes%2Fagent--kaizen-181717?logo=github)](https://github.com/LevyBytes/agent-kaizen)
 
 Agent Kaizen is a practical reference implementation of my **Kaizen System** for AI coding-agent work in VS Code projects. Repo: <https://github.com/LevyBytes/agent-kaizen>.
 
-Coding agents now remember things between sessions on their own. What they still do not give you
-is proof. Agent Kaizen is a local system of record that sits above the agents: every task,
-go/no-go verification result, artifact hash, prediction, and promoted lesson is written to one
-queryable database on your machine — by Claude Code and Codex through the same CLI — so the next
-session starts from recorded evidence instead of the agent's recollection. The method is a
-managed loop:
+Coding agents now remember things between sessions on their own. What they still do not give you is proof. Agent Kaizen is a local system of record that sits above the agents: every task, go/no-go verification result, artifact hash, prediction, and promoted lesson is written to one queryable database on your machine — by Claude Code and Codex through the same CLI — so the next session starts from recorded evidence instead of the agent's recollection. The method is a managed loop:
 
 ```text
 SAVMI = Scope -> Adapt -> Verify -> Manage -> Improve
 ```
 
-Every layer ends in records. Verification writes conclusions you can query later. Lessons are
-gated: agents record GOTCHAs freely, but nothing becomes durable practice until it is validated
-and deliberately promoted, with the full lineage kept. With my framework and harness, you can
-accomplish a tremendous amount of useful work as just an individual working with AI agents. More
-quality and a lot less slop.
+Every layer ends in records. Verification writes conclusions you can query later. Lessons are gated: agents record GOTCHAs freely, but nothing becomes durable practice until it is validated and deliberately promoted, with the full lineage kept. With my framework and harness, you can accomplish a tremendous amount of useful work as just an individual working with AI agents. More quality and a lot less slop.
 
 This repo is an **active foundation**: it is usable now, but always evolving, and intentionally built as a reference harness that can be adapted into other projects. This work is independent and is not affiliated with or endorsed by OpenAI, Anthropic, Microsoft, GitHub, VS Code, Turso, or any other vendor. Although if my work helped you, I do accept donations for tacos and tea if you're feeling generous.
 
-<!-- BENCH-TEASER:BEGIN -->
+## Benchmarks Preview
 
-Proof is in the pudding: record writes land in under 30 ms, a full session-start digest reads back in
-~0.21 s at 5,000 records, and restoring context from records is ~28× cheaper than replaying a
-session transcript — measured, repeatable, on your machine: see [Benchmarks](#benchmarks).
-
-<!-- BENCH-TEASER:END -->
+Proof is in the pudding: record writes land in under 30 ms, a full session-start digest reads back in ~0.21 s at 5,000 records, and restoring context from records is ~28× cheaper than replaying a session transcript — measured, repeatable, on your machine: see [Benchmarks](#benchmarks).
 
 ## Contents
 
@@ -61,6 +45,7 @@ session transcript — measured, repeatable, on your machine: see [Benchmarks](#
   - [Daily Workflow](#daily-workflow)
   - [Your First Ten Minutes](#your-first-ten-minutes)
   - [Complete Command Index](#complete-command-index)
+    - [Operational Flags And File Safety](#operational-flags-and-file-safety)
   - [Local Database And Backend](#local-database-and-backend)
   - [Adopting Agent Kaizen In A Project](#adopting-agent-kaizen-in-a-project)
     - [Use This Harness Directly](#use-this-harness-directly)
@@ -131,105 +116,69 @@ flowchart LR
     DB -->|"read-back: R0, X5, L10, Q9, T4"| NEXT["next session"]
 ```
 
-Every agent host writes through one CLI into one database; the next session — whichever agent
-runs it — starts from records, not recollection.
+Every agent host writes through one CLI into one database; the next session — whichever agent runs it — starts from records, not recollection.
 
 ## What This Repo Provides
 
 - Shareable system documents for agentic coding workflows.
 - A local data plane backed by a direct-file Turso/libSQL-compatible database. SQL go Brrrrrrrr
 - A single CLI entrypoint, `kaizen.py`, for structured writes and reports.
-- Command families for tasks, plans, ledgers, proofs, evals, source locks, artifacts, IRL Review,
-  anti-patterns, learning records, evidence ingestion, activity traces and eval scores, and the
-  improvement lab.
+- Command families for tasks, plans, ledgers, proofs, evals, source locks, artifacts, IRL Review, anti-patterns, learning records, evidence ingestion, activity traces and eval scores, and the improvement lab.
 - Project and skill `evals/` surfaces for command stubs and portable eval fixtures.
 - VS Code project-shape guidance for Codex, Claude Code, and similar coding agents.
 - Deterministic scripts that move repetitive mechanics out of the model context window.
-- A transcript-mining helper (`support_scripts/mine_transcripts.py`) that drafts GOTCHA
-  candidates from your own agent session logs — read-only on transcripts, human-reviewed, and
-  promoted only through the normal `G1` write gate.
+- A transcript-mining helper (`support_scripts/mine_transcripts.py`) that drafts GOTCHA candidates from your own agent session logs — read-only on transcripts, human-reviewed, and promoted only through the normal `G1` write gate.
 
 ## Why Not Just Built-In Agent Memory?
 
-Because memory and evidence are different problems. First-party agent memory — auto-generated
-notes, insights, per-project memory files — is good at carrying preferences and context between
-sessions, and Agent Kaizen does not compete with it. What it does not carry is anything you can
-audit: whether a claim was verified, by what command, with what result; what the agent predicted
-before the work versus what actually happened; which recorded "lessons" were ever validated
-before being treated as fact.
+Because memory and evidence are different problems. First-party agent memory — auto-generated notes, insights, per-project memory files — is good at carrying preferences and context between sessions, and Agent Kaizen does not compete with it. What it does not carry is anything you can audit: whether a claim was verified, by what command, with what result; what the agent predicted before the work versus what actually happened; which recorded "lessons" were ever validated before being treated as fact.
 
 Agent Kaizen keeps those as structured records in one local database:
 
-- Verification records with explicit go/no-go conclusions (`Q2`, queried with `Q9`), linked to
-  tasks and proof artifacts with hashes.
-- A gated lesson path: agents record GOTCHAs freely, but promotion to LEARNING and LEARNED is a
-  deliberate, recorded act with full lineage (`L2`/`L3`, read back with `L10`) — validated first,
-  durable second.
-- IRL Review records that pair predictions with observed outcomes (`I1`-`I5`), so calibration is
-  measurable instead of anecdotal.
-- Private policy context in the DB, not in tracked docs (`X*`), so operational rules never land
-  in a public repo.
-- One database and one CLI for every agent host you use — records written in a Claude Code
-  session are read back in a Codex session, and vice versa.
+- Verification records with explicit go/no-go conclusions (`Q2`, queried with `Q9`), linked to tasks and proof artifacts with hashes.
+- A gated lesson path: agents record GOTCHAs freely, but promotion to LEARNING and LEARNED is a deliberate, recorded act with full lineage (`L2`/`L3`, read back with `L10`) — validated first, durable second.
+- IRL Review records that pair predictions with observed outcomes (`I1`-`I5`), so calibration is measurable instead of anecdotal.
+- Private policy context in the DB, not in tracked docs (`X*`), so operational rules never land in a public repo.
+- One database and one CLI for every agent host you use — records written in a Claude Code session are read back in a Codex session, and vice versa.
 
-|                      | Built-in agent memory      | Rules & instruction files | Agent Kaizen                           |
-| -------------------- | -------------------------- | ------------------------- | -------------------------------------- |
-| What it carries      | Preferences, context notes | Standing guidance         | Structured work records                |
-| Verified or asserted | Asserted by the agent      | Asserted by the author    | Verification conclusions with evidence |
-| Queryable later      | Rarely                     | No — static text          | SQL-backed queries and reports         |
-| Across agent hosts   | Per-product silos          | Per-file copies           | One DB, one CLI, every host            |
-| Lessons              | Auto-noted, unvalidated    | Hand-curated              | Gated promotion with full lineage      |
+|  | Built-in agent memory | Rules & instruction files | Agent Kaizen |
+| --- | --- | --- | --- |
+| What it carries | Preferences, context notes | Standing guidance | Structured work records |
+| Verified or asserted | Asserted by the agent | Asserted by the author | Verification conclusions with evidence |
+| Queryable later | Rarely | No — static text | SQL-backed queries and reports |
+| Across agent hosts | Per-product silos | Per-file copies | One DB, one CLI, every host |
+| Lessons | Auto-noted, unvalidated | Hand-curated | Gated promotion with full lineage |
 
-Built-in memory is a fine consumer of these records: the session digest (`R0`) is one small JSON
-payload designed to be read at session start by any agent. The records themselves need a
-deterministic write path, schema validation, and redaction gates — which is what this harness is.
+Built-in memory is a fine consumer of these records: the session digest (`R0`) is one small JSON payload designed to be read at session start by any agent. The records themselves need a deterministic write path, schema validation, and redaction gates — which is what this harness is.
 
 ## Does It Actually Pay Off?
 
 One real chain from the database this repo was built with:
 
-1. **Recorded.** During a concurrency test, parallel `K1` processes failed at connect — the
-   retry logic did not recognize the storage engine's Windows file-lock error. The failure went
-   in as GOTCHA `g_20260703083749_7af0ead4be` with the evidence attached.
-2. **Validated, then promoted.** The fix shipped with a regression test that reproduces the
-   race; only then was the GOTCHA promoted through `L2`/`L3` into LEARNING
-   `l_20260703083759_4ea0351f7e` and LEARNED `ld_20260703083810_2b4b61a94f`, and the source
-   GOTCHA was marked `promoted`.
-3. **Paid back.** Later sessions did not rediscover any of it: `R0` surfaces recent LEARNED
-   lessons at session start, and `L10` still returns the full GOTCHA → LEARNING → LEARNED
-   lineage on demand. The harness's own error messages join the loop too — when a later session
-   called `W2` with the wrong flag, the denial arrived carrying its own copy-paste fix, a
-   feature that exists because earlier command-line pain was recorded instead of forgotten.
+1. **Recorded.** During a concurrency test, parallel `K1` processes failed at connect — the retry logic did not recognize the storage engine's Windows file-lock error. The failure went in as GOTCHA `g_20260703083749_7af0ead4be` with the evidence attached.
+2. **Validated, then promoted.** The fix shipped with a regression test that reproduces the race; only then was the GOTCHA promoted through `L2`/`L3` into LEARNING `l_20260703083759_4ea0351f7e` and LEARNED `ld_20260703083810_2b4b61a94f`, and the source GOTCHA was marked `promoted`.
+3. **Paid back.** Later sessions did not rediscover any of it: `R0` surfaces recent LEARNED lessons at session start, and `L10` still returns the full GOTCHA → LEARNING → LEARNED lineage on demand. The harness's own error messages join the loop too — when a later session called `W2` with the wrong flag, the denial arrived carrying its own copy-paste fix, a feature that exists because earlier command-line pain was recorded instead of forgotten.
 
-Those ids are real records, not staged examples. The loop documented in this README is the loop
-that built this repo.
+Those ids are real records, not staged examples. The loop documented in this README is the loop that built this repo.
 
 ## Why AGPL
 
-This project is AGPL-3.0 on purpose. The license exists to help individuals and small teams — not
-major corporations that take open source work, wall it off behind a service, and give nothing
-back. That violates the spirit of open source, and the AGPL is the license that says so with
-teeth. If you improve this harness and offer it to others, those improvements stay open for
-everyone.
+This project is AGPL-3.0 on purpose. The license exists to help individuals and small teams — not major corporations that take open source work, wall it off behind a service, and give nothing back. That violates the spirit of open source, and the AGPL is the license that says so with teeth. If you improve this harness and offer it to others, those improvements stay open for everyone.
 
 What it means for you in practice:
 
-- Using Agent Kaizen to manage your projects does **not** make your projects AGPL. The license
-  covers this harness's code — not your code, not your records. Your DB is yours.
+- Using Agent Kaizen to manage your projects does **not** make your projects AGPL. The license covers this harness's code — not your code, not your records. Your DB is yours.
 - Clone it, adapt it, link the engine into private repos — all fine.
-- The share-back obligation triggers only if you distribute a modified harness or run it as a
-  service for others.
+- The share-back obligation triggers only if you distribute a modified harness or run it as a service for others.
 
-This is a plain-language summary, not legal advice — see [`LICENSE`](LICENSE) for the actual
-terms.
+This is a plain-language summary, not legal advice — see [`LICENSE`](LICENSE) for the actual terms.
 
 ## Requirements
 
 - Windows 10+ with PowerShell 5.1+, or macOS / Linux with a POSIX shell.
-- Python 3.12+ with `venv` support (the installers can install it for you).
+- Python 3.12 or newer with `venv` support (the installers can install it for you). 3.12 is the CI-tested baseline; the installers require at least 3.12.
 - git 2.20+.
-- ~2 GB free RAM for the core harness; 8 GB+ recommended only if you enable the optional
-  PyTorch/Ollama/ComfyUI backends.
+- ~2 GB free RAM for the core harness; 8 GB+ recommended only if you enable the optional PyTorch/Ollama/ComfyUI backends.
 
 ## Setup
 
@@ -244,23 +193,47 @@ DEVROOT/
 `-- Python/venvs/kaizen/   shared Python venv
 ```
 
-**Windows** — download [`Install-Agent-Kaizen.cmd`](setup/Install-Agent-Kaizen.cmd) and double-click it (it installs git + Python via winget, user scope — no admin):
+**Windows** — download [`Install-Agent-Kaizen.cmd`](setup/Install-Agent-Kaizen.cmd) and double-click it. It opens an **elevated PowerShell window** (approve the UAC prompt — admin is needed to bootstrap winget/App Installer and the build toolchain) and installs git + Python (winget when available, otherwise directly from git-scm.com / python.org) into your chosen `DEVROOT`:
 
 ```powershell
 curl.exe -L -o Install-Agent-Kaizen.cmd https://raw.githubusercontent.com/LevyBytes/agent-kaizen/main/setup/Install-Agent-Kaizen.cmd
-.\Install-Agent-Kaizen.cmd
+.\Install-Agent-Kaizen.cmd X:\dev
 ```
 
 A downloaded `.cmd` carries the "mark of the web", so SmartScreen may warn the first time — choose **More info → Run anyway** (or right-click the file → Properties → **Unblock**).
+
+The database binding (`pyturso`) has no prebuilt Windows wheel, so the installer offers a developer-tool menu and installs **Rust + Visual Studio Build Tools** (a multi-GB download) to compile it, with .NET / CMake / Node.js / VS Code as optional extras. To skip the toolchain, supply a prebuilt `pyturso` wheel (drop it in `DEVROOT\wheels` or pass `-PyTursoWheelUrl`). See [`setup/SETUP.md`](setup/SETUP.md) for details.
 
 **Linux / macOS** — download [`install-agent-kaizen.sh`](setup/install-agent-kaizen.sh) and run it (it installs git + Python 3 via your system package manager — apt/dnf/yum/pacman/zypper, or Homebrew on macOS; `sudo` where needed):
 
 ```sh
 curl -L -o install-agent-kaizen.sh https://raw.githubusercontent.com/LevyBytes/agent-kaizen/main/setup/install-agent-kaizen.sh
-bash install-agent-kaizen.sh
+bash install-agent-kaizen.sh "$HOME/dev"
 ```
 
-Re-running is safe. If no package manager is available (older Windows without winget; an unsupported Linux distro), the installer prints the official [Git](https://git-scm.com/download/win) and [Python](https://www.python.org/downloads/) links — install those (tick "Add to PATH") and re-run. Already have the repo cloned? On Linux/macOS run `bash setup/setup.sh [DEVROOT]`; on Windows run `setup\Install-Agent-Kaizen.cmd`, which detects an existing clone and skips re-cloning.
+Re-running is safe. On Windows, winget is optional — if it cannot be bootstrapped the installer downloads Git and Python straight from their official sites, so it still completes. If those direct installs also fail (or on an unsupported Linux distro), the installer prints the official [Git](https://git-scm.com/download/win) and [Python](https://www.python.org/downloads/) links — install those (tick "Add to PATH") and re-run. Already have the repo cloned? On Linux/macOS run `bash setup/setup.sh [DEVROOT]`; on Windows run `setup\Install-Agent-Kaizen.cmd`, which detects an existing clone and skips re-cloning.
+
+**Try it in Windows Sandbox first (optional).** A generic template is included at [`AI/tests/windows-sandbox-template.wsb`](AI/tests/windows-sandbox-template.wsb) — launch it to test the installer in a throwaway VM. The one thing a fresh Windows 11 sandbox needs is **Smart App Control disabled**, which the template's logon script does automatically (SAC Enforce otherwise blocks the per-user Python install). Keep any folder mappings minimal.
+
+Installer planning and diagnostics:
+
+```powershell
+.\Install-Agent-Kaizen.cmd X:\dev -ListSteps -NoPause
+.\Install-Agent-Kaizen.cmd X:\dev -PlanOnly -NoNetwork -NoExternalActions -NoUserEnvWrites -EmitPlanJson X:\dev\agent-kaizen\AI\work\installer-plan.json -NoPause
+.\Install-Agent-Kaizen.cmd X:\dev -SelfTest -NoNetwork -NoExternalActions -NoUserEnvWrites -NoPause
+```
+
+```sh
+bash install-agent-kaizen.sh "$HOME/dev" --list-steps
+bash install-agent-kaizen.sh "$HOME/dev" --plan-only --no-network --no-external-actions --no-user-env-writes --emit-plan-json "$HOME/dev/agent-kaizen/AI/work/installer-plan.json"
+bash install-agent-kaizen.sh "$HOME/dev" --self-test --no-network --no-external-actions --no-user-env-writes --no-input
+```
+
+The one-file installers also accept `-RepoSource` / `--repo-source` for local-source testing, `-Ref` / `--ref` to pin a tag or branch, `-NoPrompt` / `--no-input` for deterministic non-interactive runs, and `-AssumeYes` / `--assume-yes` when prompts are allowed but should default to yes. They write progress logs and setup state under `DEVROOT/agent-kaizen-setup/` (`DEVROOT\agent-kaizen-setup\` on Windows). Long native commands write individual command logs under `logs/`; downloads show byte counts, percent, throughput, and ETA when the server publishes a total size. Package managers that hide totals still show elapsed time and recent output.
+
+Windows Sandbox guidance: pass an explicit writable `DEVROOT` and keep the installer source mapping read-only if desired. The Windows installer resolves `DEVROOT` before tool bootstrap, logs under that root, attempts App Installer registration, tries `Microsoft.WinGet.Client` repair, then falls back to direct App Installer package download. If App Installer was installed but the current terminal still cannot invoke `winget.exe`, close that setup window, open a fresh terminal or restart the sandbox session, and rerun the same command.
+
+**Pin to a released version (optional, recommended for a reproducible install).** By default the installer tracks the tip of `main`. To install and stay on a specific reviewed release instead, pass a git tag: on Linux/macOS `AK_REF=<tag> bash install-agent-kaizen.sh`, on Windows `.\Install-Agent-Kaizen.cmd -Ref <tag>`. Re-runs then check out that tag rather than following `main`. Already cloned? Run `git checkout <tag>` in the repo, then re-run `setup/setup.sh`.
 
 Skills ship empty; add a store of your own with `setup/link-skills.ps1` or `setup/link-skills.sh`. The local policy DB also starts empty by design — add your own rules with `kaizen.py X1` and load them with `X5`; nothing is seeded for you.
 
@@ -270,7 +243,7 @@ This repo is developed on Windows and PowerShell, but the core Python commands a
 
 Prerequisites:
 
-- Python 3.12 with `venv` support.
+- Python 3.12 or newer with `venv` support.
 - A VS Code checkout of this repository.
 
 The installer uses a shared venv at `$DEVROOT/Python/venvs/kaizen`; the manual steps below use a repo-local `.venv` fallback, which works the same way.
@@ -295,8 +268,7 @@ python3 -m venv .venv
 ./.venv/bin/python kaizen.py --help
 ```
 
-`K1` checks or initializes the DB. `X5` loads private session policy context. `--help` shows the
-current command surface.
+`K1` checks or initializes the DB. `X5` loads private session policy context. `--help` shows the current command surface.
 
 Default local DB shape:
 
@@ -308,15 +280,11 @@ AI/db/
 `-- backups/
 ```
 
-For public repositories, keep `AI/db/` contents private/local unless a report or export has been
-deliberately sanitized.
+For public repositories, keep `AI/db/` contents private/local unless a report or export has been deliberately sanitized.
 
 ### Optional: Markdown formatting
 
-Markdown in this repo is formatted with [Prettier](https://prettier.io/) settings
-`proseWrap: preserve` and `printWidth: 100` (the config is kept local, not shipped). Prettier is
-**optional but recommended**: it is not a required gate (no CI enforcement, and you do not need it
-to use the harness), but if it is available it keeps docs consistently formatted.
+Markdown in this repo is formatted with [Prettier](https://prettier.io/) settings `proseWrap: preserve` and `printWidth: 100` (the config is kept local, not shipped). Prettier is **optional but recommended**: it is not a required gate (no CI enforcement, and you do not need it to use the harness), but if it is available it keeps docs consistently formatted.
 
 ```powershell
 npx prettier --check path/to/file.md   # report formatting drift
@@ -325,13 +293,7 @@ npx prettier --write  path/to/file.md   # apply formatting
 
 ## Testing
 
-The harness ships with a standard-library `unittest` suite under [`AI/tests/`](AI/tests/). Each test
-runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it
-never reads or writes your real `AI/db/`. The suite currently has 219 tests across 26 modules,
-including a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a
-test, a parity suite that fails if the README command table drifts from the CLI alias map, and a
-doc-examples runner that executes every command example in this README against a scratch
-database. Run it with the project venv's Python:
+The harness ships with a standard-library `unittest` suite under [`AI/tests/`](AI/tests/). Each test runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it never reads or writes your real `AI/db/`. The suite currently has 249 tests across 28 modules, including a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a test, a parity suite that fails if the README command table drifts from the CLI alias map, and a doc-examples runner that executes every command example in this README against a scratch database. Run it with the project venv's Python:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s AI/tests
@@ -343,26 +305,17 @@ database. Run it with the project venv's Python:
 
 See [`AI/tests/README.md`](AI/tests/README.md) for what each module covers.
 
-<!-- BENCHMARKS:BEGIN -->
-
 ## Benchmarks
 
-Real numbers from the real code path: `support_scripts/bench_kaizen.py` times the CLI
-in-process (interpreter startup excluded) against an isolated scratch data plane — your
-`AI/db/` is never touched. Full methodology, tables, and charts:
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Real numbers from the real code path: `support_scripts/bench_kaizen.py` times the CLI in-process (interpreter startup excluded) against an isolated scratch data plane — your `AI/db/` is never touched. Full methodology, tables, and charts: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ![Restoring session context: the R0 digest vs replaying a session transcript](docs/images/bench-context-recovery.svg)
 
-Session context restored from records is about **28× cheaper** than replaying this repo's median
-agent session transcript — and it is curated state, not a wall of chat.
+Session context restored from records is about **28× cheaper** than replaying this repo's median agent session transcript — and it is curated state, not a wall of chat.
 
 ![Write-op latency, median milliseconds](docs/images/bench-write-latency.svg)
 
-Reference run: Windows-11-10.0.26200-SP0, AMD64, Python 3.12.10, pyturso 0.6.1. Regenerate with
-`python support_scripts/bench_kaizen.py`.
-
-<!-- BENCHMARKS:END -->
+Reference run: Windows-11-10.0.26200-SP0, AMD64, Python 3.12.10, pyturso 0.6.1. Regenerate with `python support_scripts/bench_kaizen.py`.
 
 ## Daily Workflow
 
@@ -374,8 +327,7 @@ For substantial work have your agent:
    python kaizen.py X5 --json
    ```
 
-2. Check or initialize the DB, then load the session digest (active GOTCHAs, blocking
-   verifications, recent LEARNED lessons, active tasks — the read-back half of Manage):
+2. Check or initialize the DB, then load the session digest (active GOTCHAs, blocking verifications, recent LEARNED lessons, active tasks — the read-back half of Manage):
 
    ```powershell
    python kaizen.py K1 --json
@@ -386,17 +338,13 @@ For substantial work have your agent:
 4. Adapt through bounded changes and deterministic scripts where practical.
 5. Verify with ground truth first, then structured review where judgment is needed.
 6. Manage records, artifacts, hashes, proofs, source locks, and reports through the CLI.
-7. Improve by promoting useful lessons into GOTCHA, LEARNING, LEARNED, evals, docs, or scripts;
-   pull them back with `L10` (lessons + source chain), `Q9` (verification conclusions), and `T4`
-   (eval-score trends).
+7. Improve by promoting useful lessons into GOTCHA, LEARNING, LEARNED, evals, docs, or scripts; pull them back with `L10` (lessons + source chain), `Q9` (verification conclusions), and `T4` (eval-score trends).
 
-Before a major task or after a compacted conversation, reload policy context with `X5` and the
-digest with `R0`.
+Before a major task or after a compacted conversation, reload policy context with `X5` and the digest with `R0`.
 
 ## Your First Ten Minutes
 
-A copy-paste session that ends with the payoff: the digest your next session starts from. Copy
-returned IDs into later commands where placeholder tokens appear.
+A copy-paste session that ends with the payoff: the digest your next session starts from. Copy returned IDs into later commands where placeholder tokens appear.
 
 ```powershell
 python kaizen.py K1 --json
@@ -451,18 +399,11 @@ That final `R0` returns something like this (ids are examples — yours will dif
 }
 ```
 
-The steps: initialize the DB and load policy context (the policy DB ships empty; that is fine),
-start a task, record a verification result against it — a go/no-go conclusion plus what was
-checked — then record a pitfall you hit along the way. `R0` is the payoff: one small JSON payload
-with active policy rules, open GOTCHAs, blocking verification conclusions, recent LEARNED
-lessons, and active tasks — what a fresh session, or a different agent, starts from.
+The steps: initialize the DB and load policy context (the policy DB ships empty; that is fine), start a task, record a verification result against it — a go/no-go conclusion plus what was checked — then record a pitfall you hit along the way. `R0` is the payoff: one small JSON payload with active policy rules, open GOTCHAs, blocking verification conclusions, recent LEARNED lessons, and active tasks — what a fresh session, or a different agent, starts from.
 
-GOTCHAs are cheap to record; promotion is not automatic. Close the loop later: once the GOTCHA is
-validated, promote it with `L2` (and after implementation, `L3`); `L10` then returns the lesson
-with its full GOTCHA -> LEARNING -> LEARNED lineage, and the source GOTCHA is marked `promoted`.
+GOTCHAs are cheap to record; promotion is not automatic. Close the loop later: once the GOTCHA is validated, promote it with `L2` (and after implementation, `L3`); `L10` then returns the lesson with its full GOTCHA -> LEARNING -> LEARNED lineage, and the source GOTCHA is marked `promoted`.
 
-For JSON-heavy payloads, prefer `--payload-json-file`, `--summary-file`, or `--body-file` when shell
-quoting becomes awkward.
+For JSON-heavy payloads, prefer `--payload-json-file`, `--summary-file`, or `--body-file` when shell quoting becomes awkward.
 
 ## Complete Command Index
 
@@ -567,24 +508,18 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 
 A few cross-cutting flags harden the ops that touch files or the schema:
 
-- **Repo-only paths by default.** File-taking ops (`A1`, `A2`, `E1`) accept only paths inside the
-  repository, so records stay portable and free of machine-specific absolute paths. To ingest or
-  hash a file outside the repo, pass `--allow-external`; the record then stores a sanitized origin
-  (`external:<filename>` plus the content hash), never the absolute path.
-- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records
-  (SCHEMA v1 ships no foreign-key constraints, so this is the integrity check).
-- **`K1 --restamp-manifest`** reconciles the stored schema manifest hash after a benign additive
-  engine update. Writes fail closed on manifest drift (a DDL change with no migration bump); this is
-  the sanctioned way to clear that once you have confirmed the drift is expected.
-- **PDF ingestion is guarded**: size, page-count, encrypted, and no-extractable-text (scanned)
-  PDFs are denied with a structured message rather than hanging or spiking memory.
+- **Repo-only paths by default.** File-taking ops (`A1`, `A2`, `E1`) accept only paths inside the repository, so records stay portable and free of machine-specific absolute paths. To ingest or hash a file outside the repo, pass `--allow-external`; the record then stores a sanitized origin (`external:<filename>` plus the content hash), never the absolute path.
+- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records (SCHEMA v1 ships no foreign-key constraints, so this is the integrity check).
+- **`K1 --restamp-manifest`** reconciles the stored schema manifest hash after a benign additive engine update. Writes fail closed on manifest drift (a DDL change with no migration bump); this is the sanctioned way to clear that once you have confirmed the drift is expected.
+- **PDF ingestion is guarded**: size, page-count, encrypted, and no-extractable-text (scanned) PDFs are denied with a structured message rather than hanging or spiking memory.
 
 ## Local Database And Backend
 
 The current harness uses Turso Database through Python direct local file access with `pyturso`. The local DB path is `AI/db/kaizen.db`.
 
-The implementation uses local DB files, MVCC mode, bounded retry behavior, app-generated IDs, and SHA-256 hashes for entries and artifacts where practical. The concept is backend-agnostic: another
-project can use a different database or remote service as long as records stay structured, queryable, and written through deterministic paths.
+The implementation uses local DB files, MVCC mode, bounded retry behavior, app-generated IDs, and SHA-256 hashes for entries and artifacts where practical. The concept is backend-agnostic: another project can use a different database or remote service as long as records stay structured, queryable, and written through deterministic paths.
+
+**Text search.** Record and report queries (e.g. `G3`, `L5`, `X3`, `A4`, `Q6`, `Q9`, `R11`, `S2`, `T4`) use escaped substring `LIKE` as the always-available baseline: wildcards in a query are escaped so a literal `%` or `_` matches literally, and results are bounded by each query's `--limit`. This is a scan, which is fine at per-project record scale. Turso's native full-text search (Tantivy) is an experimental engine feature and `fts_match` is not available in the pinned build, so an FTS-backed record index is intentionally deferred until Turso's FTS graduates to a stable feature; evidence search already exposes an opt-in FTS path (`KAIZEN_TURSO_FTS=1`) that falls back to `LIKE` when the feature is absent.
 
 See [`support_scripts/README.md`](support_scripts/README.md) for script-level details.
 
@@ -594,8 +529,7 @@ You can use this repo in two ways.
 
 ### Use This Harness Directly
 
-Work inside this repository, keep the local DB private, and use `kaizen.py` to manage
-tasks, proofs, evals, learning records, reports, and policy context.
+Work inside this repository, keep the local DB private, and use `kaizen.py` to manage tasks, proofs, evals, learning records, reports, and policy context.
 
 ### Adapt The Shape Elsewhere
 
@@ -665,49 +599,26 @@ The Kaizen DB includes compatible event storage so gateway integration can be ad
 
 ## Optional Backends
 
-The core harness is dependency-light and complete on its own — everything above works with
-nothing but Python and the pinned requirements. Three optional backends extend it, and each one
-stays entirely off until you install or point at it:
+The core harness is dependency-light and complete on its own — everything above works with nothing but Python and the pinned requirements. Three optional backends extend it, and each one stays entirely off until you install or point at it:
 
-- **Ollama** (`B*` / `model-*`) — connects any local or remote OpenAI-compatible model server.
-  Embeddings light up `E3` chunk embeddings and `E4 --semantic` Turso-native vector search, and
-  `model-run` adds advisory text. Enable with `KAIZEN_EMBED_MODEL` / `KAIZEN_LLM_MODEL`; setup in
-  [`setup/OLLAMA.md`](setup/OLLAMA.md).
-- **ComfyUI** (`Y*` / `comfy-*`) — turns generative image and node-graph workflows into managed
-  records. The agent authors the workflow JSON; every run is stored with its graph hash, seed,
-  artifacts, and traces, and can be replayed exactly. Setup in
-  [`setup/COMFYUI.md`](setup/COMFYUI.md).
-- **PyTorch / sentence-transformers** (`KAIZEN_EMBED_BACKEND=sentence-transformers`) —
-  in-process embeddings with no server to run, plus an embedder-backed `semantic` chunker for
-  `E3`. Install [`requirements-pytorch.txt`](requirements-pytorch.txt); setup in
-  [`setup/PYTORCH.md`](setup/PYTORCH.md). For local advisory text generation, use Ollama.
-- **Document ingestion** (`.pdf` / `.docx` / `.xlsx` in `E1`) — the native readers cover
-  `.txt` / `.md` / `.html` / `.csv` with no install; the richer formats activate when you install
-  [`requirements-docs.txt`](requirements-docs.txt) (pypdf, python-docx, openpyxl). Keep pypdf recent
-  for its malformed-PDF fixes.
+- **Ollama** (`B*` / `model-*`) — connects any local or remote OpenAI-compatible model server. Embeddings light up `E3` chunk embeddings and `E4 --semantic` Turso-native vector search, and `model-run` adds advisory text. Enable with `KAIZEN_EMBED_MODEL` / `KAIZEN_LLM_MODEL`; setup in [`setup/OLLAMA.md`](setup/OLLAMA.md).
+- **ComfyUI** (`Y*` / `comfy-*`) — turns generative image and node-graph workflows into managed records. The agent authors the workflow JSON; every run is stored with its graph hash, seed, artifacts, and traces, and can be replayed exactly. Setup in [`setup/COMFYUI.md`](setup/COMFYUI.md).
+- **PyTorch / sentence-transformers** (`KAIZEN_EMBED_BACKEND=sentence-transformers`) — in-process embeddings with no server to run, plus an embedder-backed `semantic` chunker for `E3`. Install [`requirements-pytorch.txt`](requirements-pytorch.txt); setup in [`setup/PYTORCH.md`](setup/PYTORCH.md). For local advisory text generation, use Ollama.
+- **Document ingestion** (`.pdf` / `.docx` / `.xlsx` in `E1`) — the native readers cover `.txt` / `.md` / `.html` / `.csv` with no install; the richer formats activate when you install [`requirements-docs.txt`](requirements-docs.txt) (pypdf, python-docx, openpyxl). Keep pypdf recent for its malformed-PDF fixes.
 
-Two rules hold no matter what you enable: skip all three and the deterministic chunker plus
-lexical search still cover the base case, and model output is advisory only — it never becomes
-the acceptance authority unless a deterministic verifier backs the call.
+Two rules hold no matter what you enable: skip all three and the deterministic chunker plus lexical search still cover the base case, and model output is advisory only — it never becomes the acceptance authority unless a deterministic verifier backs the call.
 
 ## FAQ
 
-**Does it phone home?** No. You will find zero mechanisms in this repo to send me — or anyone
-else — any of your data. I loathe the dystopian levels of user tracking that exist today.
-Nothing touches the network unless you deliberately configure an optional backend, and then only
-the endpoint you point it at.
+**Does it phone home?** No. You will find zero mechanisms in this repo to send me — or anyone else — any of your data. I loathe the dystopian levels of user tracking that exist today. Nothing touches the network unless you deliberately configure an optional backend, and then only the endpoint you point it at.
 
-**Does AGPL make my project AGPL?** No — the license covers this harness's code, not your code
-or your records. See [Why AGPL](#why-agpl).
+**Does AGPL make my project AGPL?** No — the license covers this harness's code, not your code or your records. See [Why AGPL](#why-agpl).
 
-**Which agents work with it?** Any agent that can run a CLI. Host instructions ship for Claude
-Code (`CLAUDE.md`) and Codex (`AGENTS.md`), and both write to the same database.
+**Which agents work with it?** Any agent that can run a CLI. Host instructions ship for Claude Code (`CLAUDE.md`) and Codex (`AGENTS.md`), and both write to the same database.
 
-**Do I need Ollama, ComfyUI, or PyTorch?** No. The core harness is dependency-light; the
-optional backends light up extra capabilities only when you install and point at them.
+**Do I need Ollama, ComfyUI, or PyTorch?** No. The core harness is dependency-light; the optional backends light up extra capabilities only when you install and point at them.
 
-**Where does my data live?** In `AI/db/` inside the repo — local, private by default, and under
-your control. Nothing is uploaded anywhere.
+**Where does my data live?** In `AI/db/` inside the repo — local, private by default, and under your control. Nothing is uploaded anywhere.
 
 **Is it Windows-only?** No. The project is developed on Windows 11 pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Ubuntu.
 
@@ -725,5 +636,4 @@ Public tracked docs should explain the portable system and local harness, not pr
 
 ## License
 
-This repo is AGPL-3.0 licensed. See [`LICENSE`](LICENSE) for the terms and
-[Why AGPL](#why-agpl) for the intent.
+This repo is AGPL-3.0 licensed. See [`LICENSE`](LICENSE) for the terms and [Why AGPL](#why-agpl) for the intent.

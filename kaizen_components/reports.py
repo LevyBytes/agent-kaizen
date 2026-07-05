@@ -8,6 +8,7 @@ from .denials import KaizenDenied
 from .hashing import file_sha256, utc_text_hash
 from .paths import EXPORT_ROOT, repo_relative
 from .policy_records import PRIORITY_ORDER_SQL, _priority_rank
+from .text_search import like_pattern
 
 
 REPORT_MAP = {
@@ -61,12 +62,12 @@ def make_report(args: Any) -> dict[str, Any]:
     conditions: list[str] = []
     params: list[Any] = []
     if query:
-        pattern = f"%{query}%"
+        pattern = like_pattern(query)
         if table in _NO_BODY_TABLES:
-            conditions.append("summary LIKE ?")
+            conditions.append("summary LIKE ? ESCAPE '\\'")
             params.append(pattern)
         else:
-            conditions.append("(summary LIKE ? OR body LIKE ?)")
+            conditions.append("(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')")
             params.extend((pattern, pattern))
     for flag in ("severity", "actionability"):
         value = getattr(args, flag, None)

@@ -1,51 +1,82 @@
 #!/usr/bin/env bash
 # Light setup for the Ollama model backend (B* / model-*).
-#
-# Ollama installs via its own official installer (https://ollama.com/download); this script verifies
-# it is present, relocates the model store under $DEVROOT (so weights stay out of the repo), pulls an
-# embedding + chat model, and prints the env vars Kaizen reads. Run it yourself.
-#
-# Usage: bash setup/install-ollama.sh [--embed-model nomic-embed-text] [--chat-model llama3.2] [--devroot DIR]
 set -euo pipefail
 
 EMBED_MODEL="nomic-embed-text"
 CHAT_MODEL="llama3.2"
 DEVROOT_ARG=""
+LIST_STEPS=0
+EMIT_PLAN_JSON=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --embed-model) EMBED_MODEL="${2:-}"; shift ;;
     --chat-model) CHAT_MODEL="${2:-}"; shift ;;
     --devroot) DEVROOT_ARG="${2:-}"; shift ;;
-    *) echo "unknown arg: $1" >&2; exit 2 ;;
+    --list-steps) LIST_STEPS=1 ;;
+    --emit-plan-json) EMIT_PLAN_JSON="${2:-}"; shift ;;
+    --plan-only) AK_PLAN_ONLY=1 ;;
+    --self-test) AK_SELF_TEST=1 ;;
+    --no-progress) AK_NO_PROGRESS=1 ;;
+    --no-network) AK_NO_NETWORK=1 ;;
+    --no-external-actions) AK_NO_EXTERNAL=1 ;;
+    --no-user-env-writes) AK_NO_USER_ENV=1 ;;
+    --assume-yes) AK_ASSUME_YES=1 ;;
+    --no-input) AK_NO_INPUT=1 ;;
+    *) printf 'unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
 done
 
-step() { printf '==> %s\n' "$1"; }
-warn() { printf '  ! %s\n' "$1" >&2; }
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-DEVROOT="${DEVROOT_ARG:-${DEVROOT:-$(dirname "$REPO_ROOT")}}"
-MODELS="$DEVROOT/Ollama/models"
-mkdir -p "$MODELS"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ "$LIST_STEPS" -eq 1 ]; then AK_PLAN_ONLY=1; fi
+# shellcheck source=setup/installer-common.sh
+source "$SCRIPT_DIR/installer-common.sh"
 
-if ! command -v ollama >/dev/null 2>&1; then
-  warn "Ollama is not on PATH. Install it from https://ollama.com/download, then re-run this script."
-  exit 1
+DEVROOT_RESOLVED="$(ak_resolve_devroot "$DEVROOT_ARG" "$REPO_ROOT")"
+ak_init "Agent Kaizen Ollama backend installer" "$REPO_ROOT" "$DEVROOT_RESOLVED" \
+  "$(ak_step_obj preflight 'Resolve DEVROOT, model store, and ollama command')" \
+  "$(ak_step_obj embed 'Pull embedding model')" \
+  "$(ak_step_obj chat 'Pull chat model')" \
+  "$(ak_step_obj summary 'Print backend environment and verification command')"
+
+if [ "$LIST_STEPS" -eq 1 ] || [ "$AK_PLAN_ONLY" -eq 1 ]; then
+  ak_show_plan
+  [ -z "$EMIT_PLAN_JSON" ] || ak_write_plan_json "$EMIT_PLAN_JSON"
+  exit 0
 fi
+[ "$AK_SELF_TEST" -eq 0 ] || ak_show_plan
 
-step "Model store: $MODELS"
-export OLLAMA_MODELS="$MODELS"
-step "Pulling embedding model: $EMBED_MODEL"
-ollama pull "$EMBED_MODEL" || warn "embed-model pull failed (is the Ollama service running?)."
-step "Pulling chat model: $CHAT_MODEL"
-ollama pull "$CHAT_MODEL" || warn "chat-model pull failed (is the Ollama service running?)."
+MODELS="$DEVROOT_RESOLVED/Ollama/models"
+OLLAMA=""
 
-echo ""
-step "Ollama backend ready. Point Kaizen at the models (current shell):"
-echo "  export OLLAMA_MODELS=\"$MODELS\""
-echo "  export KAIZEN_EMBED_MODEL=$EMBED_MODEL    # enables E3 embeddings + E4 --semantic"
-echo "  export KAIZEN_LLM_MODEL=$CHAT_MODEL       # enables B2 model-run"
-echo "  # remote OpenAI-compatible endpoint: set KAIZEN_EMBED_BASE_URL / KAIZEN_LLM_BASE_URL (+ *_API_KEY, env only)"
-echo "  Verify: python kaizen.py B1 --json"
+step_preflight() {
+  mkdir -p "$MODELS"
+  export OLLAMA_MODELS="$MODELS"
+  OLLAMA="$(command -v ollama || true)"
+  [ -n "$OLLAMA" ] || ak_die "Ollama is not on PATH. Install it from https://ollama.com/download, then re-run this script."
+  printf 'Model store: %s\n' "$MODELS"
+  printf 'Ollama: %s\n' "$OLLAMA"
+}
+
+step_embed() {
+  ak_run --note "Ollama is downloading/verifying model data for $EMBED_MODEL." -- "$OLLAMA" pull "$EMBED_MODEL"
+}
+
+step_chat() {
+  ak_run --note "Ollama is downloading/verifying model data for $CHAT_MODEL." -- "$OLLAMA" pull "$CHAT_MODEL"
+}
+
+step_summary() {
+  printf '\nOllama backend ready. Current-shell settings:\n'
+  printf '  export OLLAMA_MODELS="%s"\n' "$MODELS"
+  printf '  export KAIZEN_EMBED_MODEL=%s\n' "$EMBED_MODEL"
+  printf '  export KAIZEN_LLM_MODEL=%s\n' "$CHAT_MODEL"
+  printf '  Verify: python kaizen.py B1 --json\n'
+}
+
+ak_run_step preflight 'Resolve DEVROOT, model store, and ollama command' step_preflight
+ak_run_step embed 'Pull embedding model' step_embed
+ak_run_step chat 'Pull chat model' step_chat
+ak_run_step summary 'Print backend environment and verification command' step_summary

@@ -10,6 +10,7 @@ from .hashing import file_sha256, utc_text_hash, validate_text_fields
 from .paths import REPO_ROOT, assert_under, path_in_repo, read_text_file, repo_relative, resolve_user_path
 from .schemas import validate_record
 from .task_records import _text_arg
+from .text_search import like_pattern
 
 
 def add_artifact(args: Any) -> dict[str, Any]:
@@ -80,10 +81,11 @@ def hash_file(args: Any) -> dict[str, Any]:
 def list_artifacts(args: Any) -> dict[str, Any]:
     query = getattr(args, "query", None)
     if query:
-        pattern = f"%{query}%"
+        pattern = like_pattern(query)
         rows = fetch_all(
             "SELECT id, kind, path, sha256, bytes, summary, created_at FROM artifacts "
-            "WHERE path LIKE ? OR summary LIKE ? OR body LIKE ? ORDER BY created_at DESC LIMIT ?",
+            "WHERE path LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' "
+            "ORDER BY created_at DESC LIMIT ?",
             (pattern, pattern, pattern, int(getattr(args, "limit", None) or 20)),
         )
     else:
@@ -229,8 +231,8 @@ def query_verifications(args: Any) -> dict[str, Any]:
             params.append(value)
     query = getattr(args, "query", None)
     if query:
-        pattern = f"%{query}%"
-        conditions.append("(summary LIKE ? OR body LIKE ?)")
+        pattern = like_pattern(query)
+        conditions.append("(summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')")
         params.extend((pattern, pattern))
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(int(getattr(args, "limit", None) or 20))
@@ -369,10 +371,11 @@ def query_anti_patterns(args: Any) -> dict[str, Any]:
     query = getattr(args, "query", None)
     if not query:
         raise KaizenDenied("DENIED_QUERY_REQUIRED", {"required_action": "resubmit with --query"}, exit_code=2)
-    pattern = f"%{query}%"
+    pattern = like_pattern(query)
     rows = fetch_all(
         "SELECT id, status, scope, title, summary, created_at FROM anti_patterns "
-        "WHERE title LIKE ? OR summary LIKE ? OR symptom LIKE ? OR trigger_evidence LIKE ? "
+        "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR symptom LIKE ? ESCAPE '\\' "
+        "OR trigger_evidence LIKE ? ESCAPE '\\' "
         "ORDER BY created_at DESC LIMIT ?",
         (pattern, pattern, pattern, pattern, int(getattr(args, "limit", None) or 20)),
     )

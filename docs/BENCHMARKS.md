@@ -2,48 +2,26 @@
 
 # Benchmarks
 
-Repeatable local benchmarks for the Agent Kaizen harness: the real CLI code path, timed
-in-process against an isolated scratch data plane. Anyone can regenerate this file with one
-command (see **Reproduce**); numbers below are the committed reference run.
+Repeatable local benchmarks for the Agent Kaizen harness: the real CLI code path, timed in-process against an isolated scratch data plane. Anyone can regenerate this file with one command (see **Reproduce**); numbers below are the committed reference run.
 
-Reference machine: Windows-11-10.0.26200-SP0, AMD64, Python 3.12.10, pyturso 0.6.1.
-Generated 2026-07-03T23:15:29+00:00 (UTC), mode `full`, total 359.9s.
+Reference machine: Windows-11-10.0.26200-SP0, AMD64, Python 3.12.10, pyturso 0.6.1. Generated 2026-07-03T23:15:29+00:00 (UTC), mode `full`, total 359.9s.
 
 ## Methodology
 
-- Every operation runs through `kaizen_components.args.main()` in-process, so timings exclude
-  Python interpreter startup but include argument parsing, schema checks, fresh DB
-  connections, and commits — the per-op cost an agent actually pays.
-- The whole run targets a throwaway `KAIZEN_REPO_ROOT` temp directory; the repo's own
-  `AI/db/` is never read or written, and nothing touches the network.
-- Percentiles are nearest-rank; the clock is `time.perf_counter`. Write ops run
-  3 warmup + 50 timed iterations each; read-back
-  ops run 20 timed iterations per scale level.
-- The scale phase seeds a mix of tasks, gotchas, failed verifications, policies, and eval
-  scores so every query in the R0 session digest does real work; the `learned` table stays
-  empty (its digest query is a constant-cost scan).
-- Read-back latency can be non-monotonic across scale levels: the engine opens a fresh
-  connection per query, and connection cost tracks the size of the MVCC write log, which
-  the storage layer compacts on internal thresholds. A level measured right after a seeding
-  burst (log large, not yet compacted) can read slower than a larger level measured after a
-  compaction. Row count is not the whole story; log state matters too.
-- Retrieval hit rate is a correctness gate, not a ranking measure: lexical mode orders by
-  recency, so it is meaningful only because each marker phrase is unique to one document
-  (expected value: 1.0, plus a negative-control query that must return nothing).
-- Context recovery compares the `R0` digest payload against the text content of the
-  median-sized local agent session transcript for this project. Token counts use the
-  chars-divided-by-4 heuristic; only aggregate sizes are recorded, never content.
+- Every operation runs through `kaizen_components.args.main()` in-process, so timings exclude Python interpreter startup but include argument parsing, schema checks, fresh DB connections, and commits — the per-op cost an agent actually pays.
+- The whole run targets a throwaway `KAIZEN_REPO_ROOT` temp directory; the repo's own `AI/db/` is never read or written, and nothing touches the network.
+- Percentiles are nearest-rank; the clock is `time.perf_counter`. Write ops run 3 warmup + 50 timed iterations each; read-back ops run 20 timed iterations per scale level.
+- The scale phase seeds a mix of tasks, gotchas, failed verifications, policies, and eval scores so every query in the R0 session digest does real work; the `learned` table stays empty (its digest query is a constant-cost scan).
+- Read-back latency can be non-monotonic across scale levels: the engine opens a fresh connection per query, and connection cost tracks the size of the MVCC write log, which the storage layer compacts on internal thresholds. A level measured right after a seeding burst (log large, not yet compacted) can read slower than a larger level measured after a compaction. Row count is not the whole story; log state matters too.
+- Retrieval hit rate is a correctness gate, not a ranking measure: lexical mode orders by recency, so it is meaningful only because each marker phrase is unique to one document (expected value: 1.0, plus a negative-control query that must return nothing).
+- Context recovery compares the `R0` digest payload against the text content of the median-sized local agent session transcript for this project. Token counts use the chars-divided-by-4 heuristic; only aggregate sizes are recorded, never content.
 
 ## Limits
 
-- These numbers are **repository-local and illustrative**, not a portable benchmark: the
-  context-recovery baseline is this project's own median session transcript, so the ratio
-  reflects this repo's transcripts, not yours.
+- These numbers are **repository-local and illustrative**, not a portable benchmark: the context-recovery baseline is this project's own median session transcript, so the ratio reflects this repo's transcripts, not yours.
 - Token counts are a `chars / 4` approximation, not a real tokenizer count.
-- Retrieval hit rate is synthetic: each query targets a marker phrase unique to one seeded
-  document, so it measures correctness (does the right doc come back), not ranking quality.
-- Latency is machine- and state-dependent (see the MVCC write-log note above); treat the
-  reference run as a shape, not a guarantee.
+- Retrieval hit rate is synthetic: each query targets a marker phrase unique to one seeded document, so it measures correctness (does the right doc come back), not ranking quality.
+- Latency is machine- and state-dependent (see the MVCC write-log note above); treat the reference run as a shape, not a guarantee.
 
 ## Op Write Latency
 
@@ -80,9 +58,7 @@ xychart-beta
     line [6.7, 18.5, 8.5]
 ```
 
-Series order: `R0` session digest first, then `X5` policy context. If a mid-size
-level reads slower than a larger one, that is the MVCC write-log effect described in
-**Methodology** — latency follows log-compaction state as much as row count.
+Series order: `R0` session digest first, then `X5` policy context. If a mid-size level reads slower than a larger one, that is the MVCC write-log effect described in **Methodology** — latency follows log-compaction state as much as row count.
 
 ## Evidence Retrieval
 
@@ -94,22 +70,18 @@ level reads slower than a larger one, that is the MVCC write-log effect describe
 
 Corpus: 20 documents, 40 paragraphs each, 378 chunks total. Mode: `like`.
 
-Hit rate over 20 marker queries: top-1 1.0, top-5 1.0;
-negative control clean: true.
+Hit rate over 20 marker queries: top-1 1.0, top-5 1.0; negative control clean: true.
 
-Semantic mode: skipped (DENIED_BACKEND_UNCONFIGURED) — no embedding
-backend configured, which is the dependency-light default. Configure one and pass
-`--allow-semantic` to time vector search too.
+Semantic mode: skipped (DENIED_BACKEND_UNCONFIGURED) — no embedding backend configured, which is the dependency-light default. Configure one and pass `--allow-semantic` to time vector search too.
 
 ## Context Recovery
 
-What it costs to restore working context at session start: reading the `R0` session
-digest versus replaying a raw agent session transcript (the "just scroll up" baseline).
+What it costs to restore working context at session start: reading the `R0` session digest versus replaying a raw agent session transcript (the "just scroll up" baseline).
 
-| Source                                                | Size          | Approx tokens (chars / 4) |
-| ----------------------------------------------------- | ------------- | ------------------------- |
-| `R0` digest at 5,000 seeded records                   | 7,299 bytes   | 1,825                     |
-| Median session transcript, text content (20 sessions) | 206,232 chars | 51,558                    |
+| Source | Size | Approx tokens (chars / 4) |
+| --- | --- | --- |
+| `R0` digest at 5,000 seeded records | 7,299 bytes | 1,825 |
+| Median session transcript, text content (20 sessions) | 206,232 chars | 51,558 |
 
 ```mermaid
 xychart-beta
@@ -119,11 +91,7 @@ xychart-beta
     bar [1825.0, 51558.0]
 ```
 
-Starting from records is about **28× cheaper**
-than replaying the median transcript — and the digest is curated state (active
-policy, open GOTCHAs, blocking verifications, lessons), not a wall of chat to
-re-read. The transcript baseline is measured from this project's own local agent
-session logs; only aggregate sizes are recorded, never content.
+Starting from records is about **28× cheaper** than replaying the median transcript — and the digest is curated state (active policy, open GOTCHAs, blocking verifications, lessons), not a wall of chat to re-read. The transcript baseline is measured from this project's own local agent session logs; only aggregate sizes are recorded, never content.
 
 ## Reproduce
 
@@ -135,6 +103,4 @@ python support_scripts\bench_kaizen.py
 python support_scripts/bench_kaizen.py
 ```
 
-`--quick` runs a tiny variant into a temp directory (used by the test suite so this script
-cannot rot); `--out DIR` redirects all artifacts for a dry run; `--allow-semantic` keeps your
-embedding-backend environment variables and times `E4 --semantic` when a backend responds.
+`--quick` runs a tiny variant into a temp directory (used by the test suite so this script cannot rot); `--out DIR` redirects all artifacts for a dry run; `--allow-semantic` keeps your embedding-backend environment variables and times `E4 --semantic` when a backend responds.

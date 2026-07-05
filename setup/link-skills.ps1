@@ -1,100 +1,118 @@
-#requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   Populate the sibling SKILLS store and link its skills into this repo (Windows).
 
 .DESCRIPTION
-  The public repo ships with NO skills. This helper optionally clones a skills
-  store of your choosing into $DEVROOT\SKILLS, then creates a per-skill directory
-  JUNCTION for every skill (a folder containing SKILL.md) found under
-  $DEVROOT\SKILLS\skills\<name>, into BOTH .agents\skills\<name> and
-  .claude\skills\<name>. Re-running is safe; existing links are left alone.
-
-  Expected store layout:
-    $DEVROOT\SKILLS\skills\<skill-name>\SKILL.md
-
-.PARAMETER StoreUrl
-  Optional git URL of a skills store to clone (or pull) into $DEVROOT\SKILLS.
-
-.PARAMETER DevRoot
-  Parent folder holding this repo and the SKILLS store. Defaults to $env:DEVROOT,
-  else this repo's parent.
-
-.NOTES
-  Junctions need no admin rights. Public repo: https://github.com/LevyBytes/agent-kaizen
+  Optionally clones or updates a skills store, then creates per-skill directory
+  junctions into both .agents\skills and .claude\skills. Re-running is safe.
 #>
 [CmdletBinding()]
 param(
-    [string] $StoreUrl,
-    [string] $DevRoot,
-    [string] $RepoRoot,
-    [switch] $NoPause
+    [string]$StoreUrl,
+    [string]$DevRoot,
+    [string]$RepoRoot,
+    [string]$PythonExe,
+    [switch]$PlanOnly,
+    [switch]$ListSteps,
+    [string]$EmitPlanJson,
+    [switch]$SelfTest,
+    [switch]$NoProgressHeader,
+    [switch]$NoNetwork,
+    [switch]$NoExternalActions,
+    [switch]$NoUserEnvWrites,
+    [switch]$AssumeYes,
+    [switch]$NoInput,
+    [switch]$NoPause
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'installer-common.ps1')
 
 if (-not $RepoRoot) { $RepoRoot = Split-Path $PSScriptRoot -Parent }
-if (-not $DevRoot) { if ($env:DEVROOT) { $DevRoot = $env:DEVROOT } else { $DevRoot = Split-Path $RepoRoot -Parent } }
-$DevRoot   = [System.IO.Path]::GetFullPath($DevRoot)
-$Store     = Join-Path $DevRoot 'SKILLS'
-$SkillsDir = Join-Path $Store 'skills'
+$RepoRoot = Resolve-AkFullPath $RepoRoot
+$resolvedDevRoot = Resolve-AkDevRoot -DevRoot $DevRoot -RepoRoot $RepoRoot -NoInput:$NoInput
+$store = Join-Path $resolvedDevRoot 'SKILLS'
+$skillsDir = Join-Path $store 'skills'
+$steps = @(
+    [pscustomobject]@{ Id='preflight'; Name='Resolve store paths and validate inputs' },
+    [pscustomobject]@{ Id='store'; Name='Clone or update optional skills store' },
+    [pscustomobject]@{ Id='links'; Name='Create .agents and .claude skill junctions' },
+    [pscustomobject]@{ Id='index'; Name='Regenerate skill index when skill-drafting is available' }
+)
+Initialize-AkInstaller -Name 'Agent Kaizen skill linker' -RepoRoot $RepoRoot -DevRoot $resolvedDevRoot -Steps $steps -PlanOnly:($PlanOnly -or $ListSteps) -NoProgressHeader:$NoProgressHeader -NoNetwork:$NoNetwork -NoExternalActions:$NoExternalActions -NoUserEnvWrites:$NoUserEnvWrites -AssumeYes:$AssumeYes -NoInput:$NoInput -SelfTest:$SelfTest
 
-Write-Host '=== Agent Kaizen: link skills ===' -ForegroundColor White
-Write-Host "  DEVROOT : $DevRoot"
-Write-Host "  store   : $Store"
+if ($ListSteps -or $PlanOnly) {
+    Show-AkPlan
+    if (-not [string]::IsNullOrWhiteSpace($EmitPlanJson)) { Write-AkPlanJson -Path $EmitPlanJson }
+    if (-not $NoPause -and -not $ListSteps) { Read-Host 'Press Enter to close' | Out-Null }
+    exit 0
+}
+if ($SelfTest) { Show-AkPlan }
 
 try {
-    # 1. Optionally clone or update the skills store.
-    if ($StoreUrl) {
-        if (Test-Path (Join-Path $Store '.git')) {
-            Write-Host '  Updating existing store (git pull)...'
-            & git -C $Store pull --ff-only
-            if ($LASTEXITCODE -ne 0) { Write-Warning 'git pull did not fast-forward; leaving the store as-is.' }
+    Invoke-AkStep -Id 'preflight' -Name 'Resolve store paths and validate inputs' -ScriptBlock {
+        Write-Host ("DEVROOT : {0}" -f $resolvedDevRoot)
+        Write-Host ("RepoRoot: {0}" -f $RepoRoot)
+        Write-Host ("Store   : {0}" -f $store)
+        if ([string]::IsNullOrWhiteSpace($StoreUrl) -and -not (Test-Path -LiteralPath $skillsDir)) {
+            throw "No skills found at $skillsDir. Pass -StoreUrl <git-url> or populate the store first."
+        }
+    }
+
+    Invoke-AkStep -Id 'store' -Name 'Clone or update optional skills store' -ScriptBlock {
+        if ([string]::IsNullOrWhiteSpace($StoreUrl)) {
+            Write-Host 'No store URL supplied; using the existing local store.' -ForegroundColor DarkGray
+            return
+        }
+        Assert-AkNetworkAllowed $StoreUrl
+        $git = Get-Command git -ErrorAction SilentlyContinue
+        if (-not $git) { throw 'git not found on PATH.' }
+        if (Test-Path -LiteralPath (Join-Path $store '.git')) {
+            Invoke-AkNative -Exe $git.Source -Arguments @('-C',$store,'pull','--ff-only') -ActivityNote 'Updating the existing skills store with git pull --ff-only.'
         } else {
             $hasContent = $false
-            if (Test-Path $SkillsDir) {
-                $real = Get-ChildItem $SkillsDir -Force | Where-Object { $_.Name -ne '.gitkeep' }
-                if ($real) { $hasContent = $true }
+            if (Test-Path -LiteralPath $skillsDir) {
+                $real = @(Get-ChildItem -LiteralPath $skillsDir -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '.gitkeep' } | Select-Object -First 1)
+                if ($real.Count -gt 0) { $hasContent = $true }
             }
-            if (Test-Path $Store) {
-                $rootReal = Get-ChildItem $Store -Force | Where-Object { $_.Name -notin @('.gitkeep', 'skills') }
-                if ($rootReal) { $hasContent = $true }
+            if (Test-Path -LiteralPath $store) {
+                $rootReal = @(Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @('.gitkeep','skills') } | Select-Object -First 1)
+                if ($rootReal.Count -gt 0) { $hasContent = $true }
             }
-            if ($hasContent) { throw "SKILLS already has content at $Store; pull or manage it manually instead of cloning over it." }
-            if (Test-Path $Store) { Remove-Item -Recurse -Force $Store }
-            & git clone $StoreUrl $Store
-            if ($LASTEXITCODE -ne 0) { throw "git clone failed from $StoreUrl" }
+            if ($hasContent) { throw "SKILLS already has content at $store; pull or manage it manually instead of cloning over it." }
+            New-AkDirectory $store
+            Invoke-AkNative -Exe $git.Source -Arguments @('clone',$StoreUrl,$store) -ActivityNote 'Cloning the selected skills store.'
         }
     }
 
-    if (-not (Test-Path $SkillsDir)) {
-        throw "No skills found at $SkillsDir. Pass -StoreUrl <git-url> or populate the store first."
-    }
-
-    # 2. Link every skill (a folder containing SKILL.md) into both mirrors.
-    $mirrors = @((Join-Path $RepoRoot '.agents\skills'), (Join-Path $RepoRoot '.claude\skills'))
-    foreach ($m in $mirrors) { New-Item -ItemType Directory -Path $m -Force | Out-Null }
-
-    $linked = 0
-    foreach ($skill in (Get-ChildItem $SkillsDir -Directory)) {
-        if (-not (Test-Path (Join-Path $skill.FullName 'SKILL.md'))) { continue }
-        foreach ($m in $mirrors) {
-            $link = Join-Path $m $skill.Name
-            if (Test-Path $link) { continue }
-            New-Item -ItemType Junction -Path $link -Target $skill.FullName | Out-Null
+    Invoke-AkStep -Id 'links' -Name 'Create .agents and .claude skill junctions' -ScriptBlock {
+        if (-not (Test-Path -LiteralPath $skillsDir)) {
+            throw "No skills found at $skillsDir. Pass -StoreUrl <git-url> or populate the store first."
         }
-        $linked++
-        Write-Host "  linked: $($skill.Name)"
+        $mirrors = @((Join-Path $RepoRoot '.agents\skills'), (Join-Path $RepoRoot '.claude\skills'))
+        foreach ($m in $mirrors) { New-AkDirectory $m }
+        $linked = 0
+        foreach ($skill in (Get-ChildItem -LiteralPath $skillsDir -Directory -ErrorAction Stop)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $skill.FullName 'SKILL.md'))) { continue }
+            foreach ($m in $mirrors) {
+                $link = Join-Path $m $skill.Name
+                if (Test-Path -LiteralPath $link) { continue }
+                New-Item -ItemType Junction -Path $link -Target $skill.FullName | Out-Null
+            }
+            $linked += 1
+            Write-Host ("linked: {0}" -f $skill.Name)
+        }
+        Write-Host ("{0} skill(s) linked into .agents\skills and .claude\skills." -f $linked) -ForegroundColor Green
     }
-    Write-Host "  $linked skill(s) linked into .agents\skills and .claude\skills." -ForegroundColor Green
 
-    # 3. Best-effort: regenerate INDEX.md if the store carries skill-drafting.
-    $builder = Join-Path $SkillsDir 'skill-drafting\scripts\skill_builder.py'
-    if (Test-Path $builder) {
-        $py = Join-Path $DevRoot 'Python\venvs\kaizen\Scripts\python.exe'
-        if (-not (Test-Path $py)) { $py = 'python' }
-        & $py $builder index (Join-Path $RepoRoot '.claude\skills') --mirror (Join-Path $RepoRoot '.agents\skills')
-    } else {
-        Write-Host '  (INDEX.md not regenerated: skill-drafting\scripts\skill_builder.py not found in the store.)'
+    Invoke-AkStep -Id 'index' -Name 'Regenerate skill index when skill-drafting is available' -ScriptBlock {
+        $builder = Join-Path $skillsDir 'skill-drafting\scripts\skill_builder.py'
+        if (-not (Test-Path -LiteralPath $builder)) {
+            Write-Host 'INDEX.md not regenerated: skill-drafting\scripts\skill_builder.py not found in the store.' -ForegroundColor DarkGray
+            return
+        }
+        $py = Resolve-AkPythonExe -PythonExe $PythonExe -DevRoot $resolvedDevRoot
+        Invoke-AkNative -Exe $py -Arguments @($builder,'index',(Join-Path $RepoRoot '.claude\skills'),'--mirror',(Join-Path $RepoRoot '.agents\skills')) -ActivityNote 'Regenerating skill index files from the linked skill store.'
     }
 } catch {
     Write-Host ''

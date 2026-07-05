@@ -1,81 +1,107 @@
 #Requires -Version 5.1
 <#
-  Guided install of ComfyUI as a $DEVROOT sibling, for Agent Kaizen's Y* (comfy-*) backend.
-
-  Clones ComfyUI OUTSIDE the agent-kaizen repo (so multi-GB weights are never tracked by git),
-  creates a venv, installs requirements with a CPU/GPU branch, and prints the start command.
-  Model weights are NOT auto-downloaded (licensing + size). Run this yourself; Kaizen only needs
-  the endpoint URL (default http://127.0.0.1:8188).
+  Guided install of ComfyUI as a DEVROOT sibling for Agent Kaizen's Y* backend.
 
   Usage:
-    setup\install-comfyui.ps1                 # CPU torch
-    setup\install-comfyui.ps1 -Gpu            # CUDA torch wheel
-    setup\install-comfyui.ps1 -DevRoot D:\dev # explicit sibling root
+    setup\install-comfyui.ps1 [-Gpu] [-DevRoot D:\dev] [-PythonExe path]
+    setup\install-comfyui.ps1 -ListSteps
+    setup\install-comfyui.ps1 -PlanOnly -NoNetwork -NoExternalActions
 #>
 [CmdletBinding()]
 param(
     [string]$DevRoot,
+    [string]$PythonExe,
     [switch]$Gpu,
     [string]$CudaIndex = 'https://download.pytorch.org/whl/cu121',
-    [string]$Repo = 'https://github.com/comfyanonymous/ComfyUI.git'
+    [string]$Repo = 'https://github.com/comfyanonymous/ComfyUI.git',
+    [switch]$PlanOnly,
+    [switch]$ListSteps,
+    [string]$EmitPlanJson,
+    [switch]$SelfTest,
+    [switch]$NoProgressHeader,
+    [switch]$NoNetwork,
+    [switch]$NoExternalActions,
+    [switch]$NoUserEnvWrites,
+    [switch]$AssumeYes,
+    [switch]$NoInput
 )
 $ErrorActionPreference = 'Stop'
-function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Warn($m) { Write-Host "  ! $m" -ForegroundColor Yellow }
-function Die($m)  { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
+. (Join-Path $PSScriptRoot 'installer-common.ps1')
 
-# agent-kaizen repo root = parent of this setup/ dir; $DEVROOT = its parent (the sibling convention).
 $repoRoot = Split-Path -Parent $PSScriptRoot
-if (-not $DevRoot) {
-    if ($env:DEVROOT) { $DevRoot = $env:DEVROOT } else { $DevRoot = Split-Path -Parent $repoRoot }
+$resolvedDevRoot = Resolve-AkDevRoot -DevRoot $DevRoot -RepoRoot $repoRoot -NoInput:$NoInput
+$steps = @(
+    [pscustomobject]@{ Id='preflight'; Name='Resolve DEVROOT, Python, Git, and target paths' },
+    [pscustomobject]@{ Id='clone'; Name='Clone or validate ComfyUI repository' },
+    [pscustomobject]@{ Id='venv'; Name='Create ComfyUI virtual environment' },
+    [pscustomobject]@{ Id='torch'; Name='Install CPU or CUDA torch packages' },
+    [pscustomobject]@{ Id='deps'; Name='Install ComfyUI requirements' },
+    [pscustomobject]@{ Id='summary'; Name='Print start and verification commands' }
+)
+Initialize-AkInstaller -Name 'Agent Kaizen ComfyUI installer' -RepoRoot $repoRoot -DevRoot $resolvedDevRoot -Steps $steps -PlanOnly:($PlanOnly -or $ListSteps) -NoProgressHeader:$NoProgressHeader -NoNetwork:$NoNetwork -NoExternalActions:$NoExternalActions -NoUserEnvWrites:$NoUserEnvWrites -AssumeYes:$AssumeYes -NoInput:$NoInput -SelfTest:$SelfTest
+
+if ($ListSteps -or $PlanOnly) {
+    Show-AkPlan
+    if (-not [string]::IsNullOrWhiteSpace($EmitPlanJson)) { Write-AkPlanJson -Path $EmitPlanJson }
+    exit 0
 }
-$target = Join-Path $DevRoot 'ComfyUI'
-Step "DEVROOT:        $DevRoot"
-Step "ComfyUI target: $target"
+if ($SelfTest) { Show-AkPlan }
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die 'git not found on PATH.' }
-$pyCmd = Get-Command python -ErrorAction SilentlyContinue
-if (-not $pyCmd) { $pyCmd = Get-Command py -ErrorAction SilentlyContinue }
-if (-not $pyCmd) { Die 'python not found on PATH.' }
-$python = $pyCmd.Source
+$script:AkPython = ''
+$script:AkGit = ''
+$script:AkTarget = Join-Path $resolvedDevRoot 'ComfyUI'
+$script:AkVenv = Join-Path $script:AkTarget '.venv'
+$script:AkVenvPython = Join-Path $script:AkVenv 'Scripts\python.exe'
 
-if (-not $Gpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
-    Warn 'NVIDIA GPU detected. Re-run with -Gpu for a CUDA torch wheel; continuing with CPU torch.'
+Invoke-AkStep -Id 'preflight' -Name 'Resolve DEVROOT, Python, Git, and target paths' -ScriptBlock {
+    $script:AkPython = Resolve-AkPythonExe -PythonExe $PythonExe -DevRoot $resolvedDevRoot
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) { throw 'git not found on PATH.' }
+    $script:AkGit = $git.Source
+    if (-not $Gpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+        Write-Host 'NVIDIA GPU detected. Re-run with -Gpu for a CUDA torch wheel; continuing with CPU torch.' -ForegroundColor Yellow
+    }
+    Write-Host ("DEVROOT: {0}" -f $resolvedDevRoot) -ForegroundColor Cyan
+    Write-Host ("ComfyUI target: {0}" -f $script:AkTarget) -ForegroundColor Cyan
+    Write-Host ("Python: {0}" -f $script:AkPython) -ForegroundColor Cyan
 }
 
-if (Test-Path $target) {
-    Step "ComfyUI already present (skipping clone). Pull updates yourself if desired."
-} else {
-    Step 'Cloning ComfyUI...'
-    & git clone --depth 1 $Repo $target
-    if ($LASTEXITCODE -ne 0) { Die 'git clone failed.' }
+Invoke-AkStep -Id 'clone' -Name 'Clone or validate ComfyUI repository' -ScriptBlock {
+    if (Test-Path -LiteralPath (Join-Path $script:AkTarget 'main.py')) {
+        Write-Host ("ComfyUI already present: {0}" -f $script:AkTarget) -ForegroundColor Green
+    } else {
+        Invoke-AkNative -Exe $script:AkGit -Arguments @('clone','--depth','1',$Repo,$script:AkTarget) -ActivityNote 'Git is cloning ComfyUI repository data; network speed controls the duration.'
+    }
 }
 
-$venv = Join-Path $target '.venv'
-$venvPy = Join-Path $venv 'Scripts\python.exe'
-if (-not (Test-Path $venvPy)) {
-    Step "Creating venv at $venv ..."
-    & $python -m venv $venv
-    if ($LASTEXITCODE -ne 0) { Die 'venv creation failed.' }
+Invoke-AkStep -Id 'venv' -Name 'Create ComfyUI virtual environment' -ScriptBlock {
+    if (Test-Path -LiteralPath $script:AkVenvPython) {
+        Write-Host ("ComfyUI venv already exists: {0}" -f $script:AkVenv) -ForegroundColor Green
+    } else {
+        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','venv',$script:AkVenv) -ActivityNote 'Creating the ComfyUI Python virtual environment.'
+    }
+    Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','--upgrade','pip') -ActivityNote 'Upgrading pip inside the ComfyUI venv.'
 }
-& $venvPy -m pip install --upgrade pip | Out-Null
 
-if ($Gpu) {
-    Step "Installing CUDA torch from $CudaIndex ..."
-    & $venvPy -m pip install torch torchvision torchaudio --index-url $CudaIndex
-} else {
-    Step 'Installing CPU torch ...'
-    & $venvPy -m pip install torch torchvision torchaudio
+Invoke-AkStep -Id 'torch' -Name 'Install CPU or CUDA torch packages' -ScriptBlock {
+    if ($Gpu) {
+        Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','torch','torchvision','torchaudio','--index-url',$CudaIndex) -ActivityNote ('Installing CUDA torch packages from {0}.' -f $CudaIndex)
+    } else {
+        Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','torch','torchvision','torchaudio') -ActivityNote 'Installing CPU torch packages.'
+    }
 }
-if ($LASTEXITCODE -ne 0) { Die 'torch install failed.' }
-Step 'Installing ComfyUI requirements ...'
-& $venvPy -m pip install -r (Join-Path $target 'requirements.txt')
-if ($LASTEXITCODE -ne 0) { Die 'ComfyUI requirements install failed.' }
 
-Write-Host ''
-Step 'ComfyUI installed.'
-Write-Host "  Models:    place a checkpoint under $target\models\checkpoints\  (not auto-downloaded)"
-Write-Host "  Start:     & `"$venvPy`" `"$(Join-Path $target 'main.py')`""
-Write-Host '  URL:       http://127.0.0.1:8188  (override with KAIZEN_COMFYUI_URL or --endpoint)'
-Write-Host '  Verify:    python kaizen.py Y5 --json'
-Write-Host "  Workspace: add $target to your local .code-workspace to see it in the Explorer (stays out of git)"
+Invoke-AkStep -Id 'deps' -Name 'Install ComfyUI requirements' -ScriptBlock {
+    $req = Join-Path $script:AkTarget 'requirements.txt'
+    if (-not (Test-Path -LiteralPath $req)) { throw "ComfyUI requirements file not found: $req" }
+    Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','-r',$req) -ActivityNote 'Installing ComfyUI requirements; pip output is logged and tailed while this runs.'
+}
+
+Invoke-AkStep -Id 'summary' -Name 'Print start and verification commands' -ScriptBlock {
+    Write-Host ''
+    Write-Host 'ComfyUI installed.' -ForegroundColor Green
+    Write-Host ("  Models:    place checkpoints under {0}" -f (Join-Path $script:AkTarget 'models\checkpoints'))
+    Write-Host ("  Start:     & '{0}' '{1}'" -f $script:AkVenvPython, (Join-Path $script:AkTarget 'main.py'))
+    Write-Host '  URL:       http://127.0.0.1:8188  (override with KAIZEN_COMFYUI_URL or --endpoint)'
+    Write-Host '  Verify:    python kaizen.py Y5 --json'
+}

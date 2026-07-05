@@ -1,51 +1,88 @@
 #!/usr/bin/env bash
-# Install the OPT-IN PyTorch extra (in-process sentence-transformers embeddings + semantic chunking).
-#
-# Embeddings run IN-PROCESS, so this installs into the python on PATH -- run it with the SAME python
-# (venv) you launch kaizen.py with. Redirects the HuggingFace weight cache to $DEVROOT/models via
-# HF_HOME so weights stay out of the repo. torch is heavy + GPU-specific (use --gpu for a CUDA wheel).
-#
-# Usage: bash setup/install-pytorch.sh [--gpu] [--cuda-index URL] [--devroot DIR]
+# Install the OPT-IN PyTorch extra (sentence-transformers embeddings).
 set -euo pipefail
 
 GPU=0
 CUDA_INDEX="https://download.pytorch.org/whl/cu121"
 DEVROOT_ARG=""
+PYTHON_EXE=""
+LIST_STEPS=0
+EMIT_PLAN_JSON=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu) GPU=1 ;;
     --cuda-index) CUDA_INDEX="${2:-}"; shift ;;
     --devroot) DEVROOT_ARG="${2:-}"; shift ;;
-    *) echo "unknown arg: $1" >&2; exit 2 ;;
+    --python-exe) PYTHON_EXE="${2:-}"; shift ;;
+    --list-steps) LIST_STEPS=1 ;;
+    --emit-plan-json) EMIT_PLAN_JSON="${2:-}"; shift ;;
+    --plan-only) AK_PLAN_ONLY=1 ;;
+    --self-test) AK_SELF_TEST=1 ;;
+    --no-progress) AK_NO_PROGRESS=1 ;;
+    --no-network) AK_NO_NETWORK=1 ;;
+    --no-external-actions) AK_NO_EXTERNAL=1 ;;
+    --no-user-env-writes) AK_NO_USER_ENV=1 ;;
+    --assume-yes) AK_ASSUME_YES=1 ;;
+    --no-input) AK_NO_INPUT=1 ;;
+    *) printf 'unknown arg: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
 done
 
-step() { printf '==> %s\n' "$1"; }
-die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-DEVROOT="${DEVROOT_ARG:-${DEVROOT:-$(dirname "$REPO_ROOT")}}"
-CACHE="$DEVROOT/models"
-mkdir -p "$CACHE"
-export HF_HOME="$CACHE"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ "$LIST_STEPS" -eq 1 ]; then AK_PLAN_ONLY=1; fi
+# shellcheck source=setup/installer-common.sh
+source "$SCRIPT_DIR/installer-common.sh"
 
-PYTHON="$(command -v python3 || command -v python || true)"
-[ -n "$PYTHON" ] || die "python not found on PATH."
-step "Installing into: $PYTHON  (must be the venv you run kaizen.py with)"
-step "HF weight cache: $CACHE  (HF_HOME)"
+DEVROOT_RESOLVED="$(ak_resolve_devroot "$DEVROOT_ARG" "$REPO_ROOT")"
+ak_init "Agent Kaizen PyTorch extra installer" "$REPO_ROOT" "$DEVROOT_RESOLVED" \
+  "$(ak_step_obj preflight 'Resolve DEVROOT, Python, and model cache')" \
+  "$(ak_step_obj torch 'Install or validate torch wheel')" \
+  "$(ak_step_obj extra 'Install Agent Kaizen PyTorch extra')" \
+  "$(ak_step_obj summary 'Print backend environment and verification command')"
 
-if [ "$GPU" -eq 1 ]; then
-  step "Installing CUDA torch from $CUDA_INDEX ..."
-  "$PYTHON" -m pip install torch --index-url "$CUDA_INDEX"
+if [ "$LIST_STEPS" -eq 1 ] || [ "$AK_PLAN_ONLY" -eq 1 ]; then
+  ak_show_plan
+  [ -z "$EMIT_PLAN_JSON" ] || ak_write_plan_json "$EMIT_PLAN_JSON"
+  exit 0
 fi
-step "Installing the opt-in extra (sentence-transformers + torch) ..."
-"$PYTHON" -m pip install -r "$REPO_ROOT/requirements-pytorch.txt"
+[ "$AK_SELF_TEST" -eq 0 ] || ak_show_plan
 
-echo ""
-step "PyTorch embedding backend installed. Point Kaizen at it (current shell):"
-echo "  export HF_HOME=\"$CACHE\""
-echo "  export KAIZEN_EMBED_BACKEND=sentence-transformers"
-echo "  export KAIZEN_EMBED_MODEL=all-MiniLM-L6-v2    # optional; this is the default"
-echo "  Verify: python kaizen.py B1 --json"
+CACHE="$DEVROOT_RESOLVED/models"
+PYTHON=""
+
+step_preflight() {
+  mkdir -p "$CACHE"
+  export HF_HOME="$CACHE"
+  PYTHON="$(ak_resolve_python "$PYTHON_EXE" "$DEVROOT_RESOLVED")"
+  [ -n "$PYTHON" ] || ak_die "python not found; run the core installer first or pass --python-exe"
+  printf 'Installing into: %s\n' "$PYTHON"
+  printf 'HF weight cache: %s\n' "$CACHE"
+}
+
+step_torch() {
+  if [ "$GPU" -eq 1 ]; then
+    ak_run --note "Installing CUDA torch from $CUDA_INDEX." -- "$PYTHON" -m pip install torch --index-url "$CUDA_INDEX"
+  else
+    ak_run --note "Installing CPU torch; pip output is logged and tailed while this runs." -- "$PYTHON" -m pip install torch
+  fi
+}
+
+step_extra() {
+  ak_run --note "Installing sentence-transformers and pinned PyTorch extra dependencies." -- "$PYTHON" -m pip install -r "$REPO_ROOT/requirements-pytorch.txt"
+}
+
+step_summary() {
+  printf '\nPyTorch embedding backend installed. Current-shell settings:\n'
+  printf '  export HF_HOME="%s"\n' "$CACHE"
+  printf '  export KAIZEN_EMBED_BACKEND=sentence-transformers\n'
+  printf '  export KAIZEN_EMBED_MODEL=all-MiniLM-L6-v2\n'
+  printf '  Verify: "%s" "%s/kaizen.py" B1 --json\n' "$PYTHON" "$REPO_ROOT"
+}
+
+ak_run_step preflight 'Resolve DEVROOT, Python, and model cache' step_preflight
+ak_run_step torch 'Install or validate torch wheel' step_torch
+ak_run_step extra 'Install Agent Kaizen PyTorch extra' step_extra
+ak_run_step summary 'Print backend environment and verification command' step_summary
