@@ -112,8 +112,14 @@ param(
     [switch] $WithNode,
     [switch] $WithVSCode,
     [switch] $NoDevTools,
-    [string] $PyTursoWheelUrl
+    [string] $PyTursoWheelUrl,
+    [string] $ProjectName,
+    [string] $Duplicate,
+    [string] $NewVenv
 )
+
+# -ProjectName is a friendlier alias for the project/folder name; it wins when both are given.
+if (-not [string]::IsNullOrWhiteSpace($ProjectName)) { $RepoName = $ProjectName }
 
 $ErrorActionPreference = 'Stop'
 # Suppress the built-in Write-Progress banner globally. Add-AppxPackage (winget/appx bootstrap) and
@@ -129,7 +135,7 @@ $WorkspaceJson = @'
 {
   "folders": [
     {
-      "name": "Agent Kaizen",
+      "name": "__AK_WS_LABEL__",
       "path": ".."
     },
     {
@@ -138,7 +144,7 @@ $WorkspaceJson = @'
     }
   ],
   "settings": {
-    "terminal.integrated.cwd": "${workspaceFolder:Agent Kaizen}",
+    "terminal.integrated.cwd": "${workspaceFolder:__AK_WS_LABEL__}",
     "terminal.integrated.defaultProfile.windows": "Agent Kaizen Developer PowerShell",
     "terminal.integrated.profiles.windows": {
       "Agent Kaizen Developer PowerShell": {
@@ -148,7 +154,7 @@ $WorkspaceJson = @'
           "-ExecutionPolicy",
           "Bypass",
           "-Command",
-          "__AK_DEVSHELL_PREFIX__$projectRoot=(Resolve-Path '${workspaceFolder:Agent Kaizen}').Path; $pythonActivate='${workspaceFolder:Agent Kaizen}/../Python/venvs/kaizen/Scripts/Activate.ps1'; if (Test-Path $pythonActivate) { & $pythonActivate } else { Write-Warning 'Python venv not found. Run the setup script.' }; Set-Location $projectRoot"
+          "__AK_DEVSHELL_PREFIX__$projectRoot=(Resolve-Path '${workspaceFolder:__AK_WS_LABEL__}').Path; $pythonActivate='${workspaceFolder:__AK_WS_LABEL__}/../Python/venvs/__AK_VENV_NAME__/Scripts/Activate.ps1'; if (Test-Path $pythonActivate) { & $pythonActivate } else { Write-Warning 'Python venv not found. Run the setup script.' }; Set-Location $projectRoot"
         ]
       },
       "PowerShell": {
@@ -156,10 +162,11 @@ $WorkspaceJson = @'
       }
     },
     "terminal.integrated.env.windows": {
-      "AGENT_KAIZEN_ROOT": "${workspaceFolder:Agent Kaizen}",
-      "AGENT_KAIZEN_VENV": "${workspaceFolder:Agent Kaizen}/../Python/venvs/kaizen"
+      "AGENT_KAIZEN_ROOT": "${workspaceFolder:__AK_WS_LABEL__}",
+      "AGENT_KAIZEN_VENV": "${workspaceFolder:__AK_WS_LABEL__}/../Python/venvs/__AK_VENV_NAME__",
+      "KAIZEN_REPO_ROOT": "${workspaceFolder:__AK_WS_LABEL__}"
     },
-    "python.defaultInterpreterPath": "${workspaceFolder:Agent Kaizen}/../Python/venvs/kaizen/Scripts/python.exe",
+    "python.defaultInterpreterPath": "${workspaceFolder:__AK_WS_LABEL__}/../Python/venvs/__AK_VENV_NAME__/Scripts/python.exe",
     "python.terminal.activateEnvironment": false,
     "files.exclude": {
       "**/__pycache__": true
@@ -178,7 +185,7 @@ setlocal
 set "AGENT_KAIZEN_ROOT=%~dp0"
 cd /d "%AGENT_KAIZEN_ROOT%"
 
-code "%AGENT_KAIZEN_ROOT%_workspace\agent-kaizen-tools.code-workspace"
+code "%AGENT_KAIZEN_ROOT%_workspace\__AK_WS_FILE__"
 
 endlocal
 '@
@@ -1821,6 +1828,23 @@ function Read-AkYesNo {
     return ($ans -eq 'y' -or $ans -eq 'yes')
 }
 
+function Test-AkTursoSatisfied {
+    # True when a Turso source build is NOT needed, so the Rust + VS Build Tools prompt can be skipped:
+    # a prebuilt pyturso wheel is already cached, OR pyturso already imports in the shared venv, OR
+    # both Rust (cargo) and VS Build Tools are already installed.
+    try {
+        foreach ($d in @($script:WheelCache, (Join-Path $script:RepoPath 'wheels'))) {
+            if ($d -and (Test-Path -LiteralPath $d) -and (Get-ChildItem -LiteralPath $d -Filter 'pyturso*.whl' -ErrorAction SilentlyContinue | Select-Object -First 1)) { return $true }
+        }
+        if ($script:VenvPython -and (Test-Path -LiteralPath $script:VenvPython)) {
+            & $script:VenvPython -c 'import pyturso' 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        }
+        if ((Resolve-RustCargo) -and (Get-AkVsDevShell)) { return $true }
+    } catch {}
+    return $false
+}
+
 function Select-AkDevTools {
     if ($NoDevTools) {
         Write-Info 'Developer tool installs disabled (-NoDevTools). Turso then needs a prebuilt wheel.'
@@ -1845,14 +1869,20 @@ function Select-AkDevTools {
         $script:ToolNode = [bool]$WithNode
         $script:ToolVSCode = [bool]$WithVSCode
     } else {
-        Write-Host ''
-        Write-Host 'Turso (the Agent Kaizen database) has no prebuilt Windows package, so pip compiles it'
-        Write-Host 'from source. That requires Rust + Visual Studio Build Tools (a multi-GB download; the'
-        Write-Host 'first compile takes a few minutes). Skip only if you supply a prebuilt pyturso wheel'
-        Write-Host '(drop it in DEVROOT\wheels or pass -PyTursoWheelUrl; see setup/SETUP.md).'
-        $rustBt = Read-AkYesNo -Prompt 'Install Rust + VS Build Tools to compile Turso?' -Default $true
-        $script:ToolRust = $rustBt
-        $script:ToolBuildTools = $rustBt
+        if (Test-AkTursoSatisfied) {
+            Write-Ok 'Turso build is already satisfied (prebuilt wheel cached or Rust + Build Tools present) -- skipping the Rust + VS Build Tools prompt.'
+            $script:ToolRust = $false
+            $script:ToolBuildTools = $false
+        } else {
+            Write-Host ''
+            Write-Host 'Turso (the Agent Kaizen database) has no prebuilt Windows package, so pip compiles it'
+            Write-Host 'from source. That requires Rust + Visual Studio Build Tools (a multi-GB download; the'
+            Write-Host 'first compile takes a few minutes). Skip only if you supply a prebuilt pyturso wheel'
+            Write-Host '(drop it in DEVROOT\wheels or pass -PyTursoWheelUrl; see setup/SETUP.md).'
+            $rustBt = Read-AkYesNo -Prompt 'Install Rust + VS Build Tools to compile Turso?' -Default $true
+            $script:ToolRust = $rustBt
+            $script:ToolBuildTools = $rustBt
+        }
         Write-Host ''
         Write-Host 'Optional developer tools (installed at the end; default No):'
         $script:ToolVSCode = Read-AkYesNo -Prompt '  Install VS Code?' -Default $false
@@ -2366,10 +2396,12 @@ function Get-AkAvailableSkills {
     return @($skills | Sort-Object Name)
 }
 
-function Ensure-Skills {
-    # Optional, best-effort: never throw out of this step. Ask which published skills to install
-    # (skill-drafting always), clone each into DEVROOT\SKILLS\skills\<name>, and junction it into
-    # .agents\skills + .claude\skills. Headless/-NoPrompt installs skill-drafting only.
+function Invoke-AkSkillsInto {
+    # Optional, best-effort: never throw. Ask which published skills to install (skill-drafting always),
+    # clone each into DEVROOT\SKILLS\skills\<name>, and junction it into the given project's
+    # .agents\skills + .claude\skills. Headless/-NoPrompt installs skill-drafting only. Shared by the
+    # normal skills step and the duplication flow.
+    param([Parameter(Mandatory)][string] $RepoPath, [string] $VenvPython)
     try {
         $store = Join-Path $script:DevRoot 'SKILLS'
         $skillsDir = Join-Path $store 'skills'
@@ -2412,7 +2444,7 @@ function Ensure-Skills {
             Write-Info 'Non-interactive mode: installing skill-drafting only.'
         }
 
-        $mirrors = @((Join-Path $script:RepoPath '.agents\skills'), (Join-Path $script:RepoPath '.claude\skills'))
+        $mirrors = @((Join-Path $RepoPath '.agents\skills'), (Join-Path $RepoPath '.claude\skills'))
         foreach ($m in $mirrors) { New-Item -ItemType Directory -Path $m -Force | Out-Null }
         $linked = 0
         $changed = $false
@@ -2441,11 +2473,11 @@ function Ensure-Skills {
         # Regenerate the skill index only when something was newly cloned/linked (or the index is
         # missing) -- Verify pillar: a warm re-run with no new skills skips this.
         $builder = Join-Path $skillsDir 'skill-drafting\scripts\skill_builder.py'
-        $indexMd = Join-Path $script:RepoPath '.claude\skills\INDEX.md'
+        $indexMd = Join-Path $RepoPath '.claude\skills\INDEX.md'
         if ($changed -or -not (Test-Path -LiteralPath $indexMd)) {
-            if ((Test-Path -LiteralPath $builder) -and $script:VenvPython -and (Test-Path -LiteralPath $script:VenvPython)) {
+            if ((Test-Path -LiteralPath $builder) -and $VenvPython -and (Test-Path -LiteralPath $VenvPython)) {
                 try {
-                    Invoke-Native -FilePath $script:VenvPython -ArgumentList @($builder, 'index', (Join-Path $script:RepoPath '.claude\skills'), '--mirror', (Join-Path $script:RepoPath '.agents\skills')) -WorkingDirectory $script:RepoPath -Note 'Regenerating skill index.' | Out-Null
+                    Invoke-Native -FilePath $VenvPython -ArgumentList @($builder, 'index', (Join-Path $RepoPath '.claude\skills'), '--mirror', (Join-Path $RepoPath '.agents\skills')) -WorkingDirectory $RepoPath -Note 'Regenerating skill index.' | Out-Null
                 } catch { Write-Warn "Skill index regeneration skipped: $($_.Exception.Message)" }
             }
         } else {
@@ -2454,6 +2486,175 @@ function Ensure-Skills {
     } catch {
         Write-Warn "Skills step did not complete (optional; run setup/link-skills later): $($_.Exception.Message)"
     }
+}
+
+# Thin wrapper: the normal skills step targets the primary repo + shared venv.
+function Ensure-Skills { Invoke-AkSkillsInto -RepoPath $script:RepoPath -VenvPython $script:VenvPython }
+
+function Get-AkExistingProject {
+    # Return the path of a properly git-backed agent-kaizen under DEVROOT, else $null.
+    $p = Join-Path $script:DevRoot 'agent-kaizen'
+    if ((Test-Path -LiteralPath (Join-Path $p '.git')) -and (Test-Path -LiteralPath (Join-Path $p 'kaizen.py')) -and (Test-Path -LiteralPath (Join-Path $p 'kaizen_components'))) { return $p }
+    return $null
+}
+
+function Read-AkProjectName {
+    param([string] $Prompt = 'Project folder name', [string] $Default = 'agent-kaizen')
+    while ($true) {
+        $suffix = if ($Default) { " [$Default]" } else { '' }
+        $ans = ([string](Read-Host ($Prompt + $suffix))).Trim()
+        if (-not $ans) { $ans = $Default }
+        if (-not $ans) { Write-Host '  A name is required.' -ForegroundColor Yellow; continue }
+        if ($ans -notmatch '^[A-Za-z0-9._-]+$') { Write-Host '  Use letters, digits, dot, dash, underscore only.' -ForegroundColor Yellow; continue }
+        return $ans
+    }
+}
+
+function New-AkLink {
+    # Junction directories (no elevation); symlink files (needs the installer's elevation), else copy.
+    param([Parameter(Mandatory)][string] $Target, [Parameter(Mandatory)][string] $LinkPath)
+    if (Test-Path -LiteralPath $LinkPath) { return }
+    if (Test-Path -LiteralPath $Target -PathType Container) {
+        New-Item -ItemType Junction -Path $LinkPath -Target $Target | Out-Null
+    } else {
+        try { New-Item -ItemType SymbolicLink -Path $LinkPath -Target $Target -ErrorAction Stop | Out-Null }
+        catch { Copy-Item -LiteralPath $Target -Destination $LinkPath -Force }
+    }
+}
+
+function Resolve-AkProjectMode {
+    # Decide fresh-install-with-optional-rename vs duplicate-from-existing, before any tool prompt.
+    $script:DuplicateMode = $false
+    $script:DuplicateName = ''
+    $script:SourceProject = $null
+    $interactive = (-not $NoPrompt) -and (-not $AssumeYes) -and [Environment]::UserInteractive
+
+    if (-not [string]::IsNullOrWhiteSpace($Duplicate)) {
+        $script:DuplicateMode = $true
+        $script:DuplicateName = $Duplicate
+        $src = Get-AkExistingProject
+        $script:SourceProject = if ($src) { $src } else { $script:RepoPath }
+        return
+    }
+
+    $existing = Get-AkExistingProject
+    if ($existing) {
+        if ($interactive) {
+            Write-Host ''
+            Write-Host "An Agent Kaizen project already exists at: $existing" -ForegroundColor Yellow
+            Write-Host ''
+            Write-Host 'Duplicate the framework into a new project? (shared engine + its own database)'
+            Write-Host '  1) New project - same shared venv'
+            Write-Host '  2) New project - a separate venv'
+            Write-Host '  3) No - skip duplication; do a normal Agent Kaizen install/update'
+            $choice = ''
+            while ($choice -notin @('1', '2', '3')) {
+                $choice = ([string](Read-Host 'Choose [1/2/3] (default 3)')).Trim()
+                if (-not $choice) { $choice = '3' }
+                if ($choice -notin @('1', '2', '3')) { Write-Host '  Please enter 1, 2, or 3.' -ForegroundColor Yellow }
+            }
+            if ($choice -eq '3') { return }
+            $script:DuplicateName = Read-AkProjectName -Prompt 'New project folder name' -Default ''
+            $script:DuplicateMode = $true
+            $script:SourceProject = $existing
+            # Option 2 gets its own venv (named after the project); option 1 shares the kaizen venv.
+            $script:NewVenv = if ($choice -eq '2') { $script:DuplicateName } else { '' }
+        }
+        return
+    }
+
+    # Fresh install: let an interactive user choose the project folder/workspace name (rename).
+    if ($interactive -and [string]::IsNullOrWhiteSpace($ProjectName)) {
+        $name = Read-AkProjectName -Prompt 'Project folder name' -Default $RepoName
+        if ($name -ne $RepoName) {
+            $script:RepoName = $name
+            $script:RepoPath = Join-Path $script:DevRoot $name
+        }
+    }
+}
+
+function Invoke-AkDuplication {
+    $src = $script:SourceProject
+    $name = $script:DuplicateName
+    if ([string]::IsNullOrWhiteSpace($name)) { throw 'Duplication requires a project name.' }
+    if ($name -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid project name: $name" }
+    if (-not $src -or -not (Test-Path -LiteralPath (Join-Path $src 'kaizen.py'))) { throw 'No source Agent Kaizen project to duplicate from.' }
+    $tgt = Join-Path $script:DevRoot $name
+    if ((Test-Path -LiteralPath $tgt) -and (Get-ChildItem -LiteralPath $tgt -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+        throw "Target already exists and is not empty: $tgt"
+    }
+    Write-Host ''
+    Write-Host ("Duplicating {0} -> {1}" -f $src, $tgt) -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $tgt -Force | Out-Null
+
+    # Linked (shared codebase) vs copied (customizable, per-project) -- same layout, never a blanket copy.
+    foreach ($it in @('kaizen.py', 'kaizen_components', 'support_scripts', 'prompt-builder-scripts', 'requirements-kaizen.txt', 'Kaizen_System.md')) {
+        $s = Join-Path $src $it
+        if (Test-Path -LiteralPath $s) { New-AkLink -Target $s -LinkPath (Join-Path $tgt $it); Write-Host "  link : $it" }
+    }
+    foreach ($it in @('AGENTS.md', 'CLAUDE.md', 'README.md', 'setup', 'evals', 'docs', 'LICENSE', '.gitignore', '.gitattributes', '.prettierrc.json', '.prettierignore')) {
+        $s = Join-Path $src $it
+        if (Test-Path -LiteralPath $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $tgt $it) -Recurse -Force; Write-Host "  copy : $it" }
+    }
+    foreach ($d in @('AI', '.agents\skills', '.claude\skills')) { New-Item -ItemType Directory -Path (Join-Path $tgt $d) -Force | Out-Null }
+    $srcSettings = Join-Path $src '.claude\settings.local.json'
+    if (Test-Path -LiteralPath $srcSettings) { Copy-Item -LiteralPath $srcSettings -Destination (Join-Path $tgt '.claude') -Force }
+
+    # Venv: shared kaizen venv, or a fresh one for -NewVenv (recreated, not byte-copied).
+    $venvPy = $script:VenvPython
+    if (-not [string]::IsNullOrWhiteSpace($NewVenv)) {
+        $nvRoot = Join-Path $script:DevRoot ("Python\venvs\{0}" -f $NewVenv)
+        $nvPy = Join-Path $nvRoot 'Scripts\python.exe'
+        if (-not (Test-Path -LiteralPath $nvPy)) {
+            Invoke-Native -FilePath $script:VenvPython -ArgumentList @('-m', 'venv', $nvRoot) -Note "Create a separate venv for $name."
+            Invoke-Native -FilePath $nvPy -ArgumentList @('-m', 'pip', 'install', '--upgrade', 'pip') -Note 'Upgrade pip in the new venv.'
+            Invoke-Native -FilePath $nvPy -ArgumentList @('-m', 'pip', 'install', '-r', (Join-Path $src 'requirements-kaizen.txt')) -WorkingDirectory $tgt -Note 'Install dependencies into the new venv.'
+        }
+        $venvPy = $nvPy
+    }
+    if (-not (Test-Path -LiteralPath $venvPy)) { throw "Python venv not found: $venvPy. Run a normal install first." }
+
+    # Wrapper: kaizen.cmd sets KAIZEN_REPO_ROOT so the linked engine writes to THIS project's DB.
+    $wrapper = "@echo off`r`nsetlocal`r`nset `"KAIZEN_REPO_ROOT=%~dp0`"`r`n`"$venvPy`" `"%~dp0kaizen.py`" %*`r`nendlocal`r`n"
+    Write-Utf8IfChanged -Path (Join-Path $tgt 'kaizen.cmd') -Content $wrapper
+
+    # Fresh DB: run the shared engine with KAIZEN_REPO_ROOT pointed at the new project.
+    $env:KAIZEN_REPO_ROOT = $tgt
+    try {
+        Invoke-Native -FilePath $venvPy -ArgumentList @((Join-Path $tgt 'kaizen.py'), 'K1', '--json') -WorkingDirectory $tgt -Note "Initialize the new project's Kaizen DB."
+    } finally {
+        Remove-Item Env:\KAIZEN_REPO_ROOT -ErrorAction SilentlyContinue
+    }
+
+    # Skills into the new project (shared store; download-if-missing + link) via the shared impl.
+    Invoke-AkSkillsInto -RepoPath $tgt -VenvPython $venvPy
+
+    # Workspace + launcher (absolute interpreter; terminal env sets KAIZEN_REPO_ROOT).
+    $wsDir = Join-Path $tgt '_workspace'
+    New-Item -ItemType Directory -Path $wsDir -Force | Out-Null
+    # Reuse the SAME workspace template as a normal install so the Developer PowerShell profile + venv
+    # activation load identically (the custom variant did not). The template's terminal env sets
+    # KAIZEN_REPO_ROOT to the workspace folder, isolating this project's DB. Venv name = shared 'kaizen'
+    # or the -NewVenv name; the relative ../Python/venvs/<name> path resolves under DEVROOT either way.
+    $venvName = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $venvPy))
+    $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule))
+    if (-not $hasVs) { try { $null = Get-AkVsDevShell } catch {}; $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule)) }
+    $devShellPrefix = ''
+    if ($hasVs) {
+        $devShellPrefix = "Import-Module '$($script:VsDevShellModule.Replace('\', '\\'))'; Enter-VsDevShell -VsInstallPath '$($script:VsInstallPath.Replace('\', '\\'))' -SkipAutomaticLocation -Arch amd64 -HostArch amd64; "
+    }
+    $wsContent = $WorkspaceJson.Replace('__AK_DEVSHELL_PREFIX__', $devShellPrefix).Replace('__AK_WS_LABEL__', $name).Replace('__AK_VENV_NAME__', $venvName)
+    Write-Utf8IfChanged -Path (Join-Path $wsDir "$name-tools.code-workspace") -Content ($wsContent + [Environment]::NewLine)
+    $launcher = "@echo off`r`nsetlocal`r`ncode `"%~dp0_workspace\$name-tools.code-workspace`"`r`nendlocal`r`n"
+    Write-Utf8IfChanged -Path (Join-Path $tgt "open-$name-vscode.cmd") -Content $launcher
+
+    Write-Host ''
+    Write-Ok "New Agent Kaizen project ready: $tgt"
+    Write-Host ("  Engine : linked from {0} (shared codebase)" -f $src)
+    Write-Host ("  Venv   : {0}" -f $venvPy)
+    Write-Host ("  DB     : {0}\AI\db\kaizen.db (its own)" -f $tgt)
+    Write-Host ("  Run    : {0} K1 --json" -f (Join-Path $tgt 'kaizen.cmd'))
+    Write-Host ("  Open   : {0}" -f (Join-Path $tgt "open-$name-vscode.cmd"))
 }
 
 function Step-Workspace {
@@ -2474,9 +2675,14 @@ function Step-Workspace {
         $rootJson = $script:VsInstallPath.Replace('\', '\\')
         $devShellPrefix = "Import-Module '$dllJson'; Enter-VsDevShell -VsInstallPath '$rootJson' -SkipAutomaticLocation -Arch amd64 -HostArch amd64; "
     }
-    $workspaceContent = $WorkspaceJson.Replace('__AK_DEVSHELL_PREFIX__', $devShellPrefix)
-    Write-Utf8IfChanged -Path (Join-Path $workspaceDir 'agent-kaizen-tools.code-workspace') -Content ($workspaceContent + [Environment]::NewLine)
-    Write-Utf8IfChanged -Path (Join-Path $script:RepoPath 'open-agent-kaizen-vscode.cmd') -Content ($LauncherCmd + [Environment]::NewLine)
+    # Workspace label + file/launcher names follow the (possibly renamed) project; keep the pretty
+    # "Agent Kaizen" label for the canonical name, use the chosen name otherwise.
+    $wsLabel = if ($RepoName -eq 'agent-kaizen') { 'Agent Kaizen' } else { $RepoName }
+    $wsFile  = "$RepoName-tools.code-workspace"
+    $workspaceContent = $WorkspaceJson.Replace('__AK_DEVSHELL_PREFIX__', $devShellPrefix).Replace('__AK_WS_LABEL__', $wsLabel).Replace('__AK_VENV_NAME__', 'kaizen')
+    $launcherContent  = $LauncherCmd.Replace('__AK_WS_FILE__', $wsFile)
+    Write-Utf8IfChanged -Path (Join-Path $workspaceDir $wsFile) -Content ($workspaceContent + [Environment]::NewLine)
+    Write-Utf8IfChanged -Path (Join-Path $script:RepoPath "open-$RepoName-vscode.cmd") -Content ($launcherContent + [Environment]::NewLine)
     New-Item -ItemType Directory -Path (Join-Path $script:DevRoot 'SKILLS\skills') -Force | Out-Null
     # When VS Build Tools were installed, drop a Developer PowerShell launcher that enters the VS
     # dev environment (cl.exe / MSVC on PATH) and activates the shared venv.
@@ -2488,8 +2694,8 @@ setlocal
 powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '$($script:VsDevShellModule)'; Enter-VsDevShell -VsInstallPath '$($script:VsInstallPath)' -SkipAutomaticLocation -Arch amd64 -HostArch amd64; if (Test-Path '$activate') { & '$activate' }; Set-Location '$($script:RepoPath)'"
 endlocal
 "@
-        Write-Utf8IfChanged -Path (Join-Path $script:RepoPath 'open-agent-kaizen-devshell.cmd') -Content ($devShellCmd + [Environment]::NewLine)
-        Write-Ok 'Developer PowerShell launcher written: open-agent-kaizen-devshell.cmd'
+        Write-Utf8IfChanged -Path (Join-Path $script:RepoPath "open-$RepoName-devshell.cmd") -Content ($devShellCmd + [Environment]::NewLine)
+        Write-Ok "Developer PowerShell launcher written: open-$RepoName-devshell.cmd"
     }
     Write-Ok 'Workspace, launcher, and SKILLS folder are present.'
 }
@@ -2541,6 +2747,13 @@ try {
         Start-AkTranscriptAndEnvironment
 
         Invoke-AkStep -Id 'preflight' -Name (Get-AkStepName 'preflight') -Body ${function:Step-Preflight}
+
+        # Before any tool prompt: detect an existing agent-kaizen and offer duplication (or apply a
+        # fresh-install rename). Duplication makes a new project and skips the normal install steps.
+        Resolve-AkProjectMode
+        if ($script:DuplicateMode) {
+            Invoke-AkDuplication
+        } else {
         Invoke-AkStep -Id 'toolselect' -Name (Get-AkStepName 'toolselect') -Body { Select-AkDevTools }
         Invoke-AkStep -Id 'winget' -Name (Get-AkStepName 'winget') -Body { Ensure-Winget }
         Invoke-AkStep -Id 'git' -Name (Get-AkStepName 'git') -Body { Ensure-Git }
@@ -2566,7 +2779,8 @@ try {
         Write-Host ("Logs       : {0}" -f $script:LogRoot)
         if (-not [string]::IsNullOrWhiteSpace($script:TranscriptLogPath)) { Write-Host ("Transcript : {0}" -f $script:TranscriptLogPath) }
         if (-not [string]::IsNullOrWhiteSpace($script:SupportBundlePath)) { Write-Host ("Support    : {0}" -f $script:SupportBundlePath) }
-        Write-Host ("Open VS Code with: {0}" -f (Join-Path $script:RepoPath 'open-agent-kaizen-vscode.cmd'))
+        Write-Host ("Open VS Code with: {0}" -f (Join-Path $script:RepoPath "open-$RepoName-vscode.cmd"))
+        }
     }
 } catch {
     $akExitCode = 1

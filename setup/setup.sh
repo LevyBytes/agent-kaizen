@@ -40,7 +40,7 @@ ak_init "Agent Kaizen setup (Linux/macOS)" "$REPO_ROOT" "$DEVROOT_RESOLVED" \
   "$(ak_step_obj venv 'Create or validate shared Python venv')" \
   "$(ak_step_obj rust 'Ensure Rust toolchain for building pyturso')" \
   "$(ak_step_obj deps 'Install pinned Agent Kaizen dependencies')" \
-  "$(ak_step_obj skills 'Scaffold empty sibling SKILLS store')" \
+  "$(ak_step_obj skills 'Select and install Agent Kaizen skills')" \
   "$(ak_step_obj workspace 'Generate VS Code workspace')" \
   "$(ak_step_obj db 'Initialize local Kaizen DB')" \
   "$(ak_step_obj summary 'Print completion summary')"
@@ -56,8 +56,15 @@ PY=""
 VENV="$DEVROOT_RESOLVED/Python/venvs/kaizen"
 VENV_PY="$VENV/bin/python"
 WS_DIR="$REPO_ROOT/_workspace"
-WS_FILE="$WS_DIR/agent-kaizen-tools.code-workspace"
+# Project + workspace naming. The bootstrap may rename the clone (folder + workspace file); the
+# canonical name keeps the pretty "Agent Kaizen" label, a renamed project uses its own name.
+PROJECT_NAME="${AK_PROJECT_NAME:-$(basename "$REPO_ROOT")}"
+if [ "$PROJECT_NAME" = "agent-kaizen" ]; then WS_LABEL="Agent Kaizen"; else WS_LABEL="$PROJECT_NAME"; fi
+WS_FILE="$WS_DIR/${PROJECT_NAME}-tools.code-workspace"
 WHEEL_CACHE="$DEVROOT_RESOLVED/wheels"
+# Whether the user opted into the Rust + C build toolchain (set by the bootstrap's dependency menu).
+# Default 0: Turso installs from its prebuilt wheel, so no toolchain and no source build.
+TOOL_RUST="${AK_TOOL_RUST:-0}"
 
 ak_have_pyturso_wheel() {
   local d
@@ -91,14 +98,18 @@ step_venv() {
 }
 
 step_rust() {
-  # pyturso builds from source unless a prebuilt wheel is present, and that build needs cargo plus a
-  # C toolchain. Skip Rust when pyturso already imports or a wheel already satisfies it.
+  # Rust is only needed to compile Turso from source. On Linux Turso installs from a prebuilt wheel,
+  # so unless the user opted in (dependency menu / --with-rust) this is skipped.
+  if [ "$TOOL_RUST" -ne 1 ]; then
+    ak_step_skipped 'not selected; Turso installs from its prebuilt wheel'
+    return 0
+  fi
   if [ -x "$VENV_PY" ] && "$VENV_PY" -c 'import turso' >/dev/null 2>&1; then
-    ak_step_skipped 'pyturso already installed; Rust not needed'
+    ak_step_skipped 'Turso already installed; Rust not needed'
     return 0
   fi
   if ak_have_pyturso_wheel; then
-    ak_step_skipped 'prebuilt pyturso wheel present; Rust not needed'
+    ak_step_skipped 'prebuilt Turso wheel present; Rust not needed'
     return 0
   fi
   if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then
@@ -125,43 +136,48 @@ step_deps() {
       || printf '  [warn] could not download the pyturso wheel from AK_PYTURSO_WHEEL_URL\n' >&2
   fi
 
-  # Wheel-first: pyturso often has no matching manylinux wheel, so pip builds it from source unless a
-  # local wheel is offered via --find-links.
   local find_links=() d
   for d in "$WHEEL_CACHE" "$REPO_ROOT/wheels"; do
     [ -d "$d" ] && find_links+=(--find-links "$d")
   done
 
   local built_from_source=0
-  if ! ak_have_pyturso_wheel; then
+  if [ "$TOOL_RUST" -eq 1 ] && ! ak_have_pyturso_wheel; then
+    # Toolchain selected and no local wheel -> compile from source; make sure cargo is reachable.
     built_from_source=1
     export CARGO_HOME="${CARGO_HOME:-$DEVROOT_RESOLVED/rust/.cargo}"
     ak_add_path_entry "$CARGO_HOME/bin"
     command -v cargo >/dev/null 2>&1 \
-      || ak_die "pyturso must be compiled but cargo is not available. Rerun (the 'rust' step installs it) or provide a prebuilt wheel. See setup/SETUP.md." "$AK_EX_UNAVAILABLE"
+      || ak_die "Turso must be compiled but cargo is not available (the 'rust' step should have installed it)." "$AK_EX_UNAVAILABLE"
   fi
 
-  local note='Installing Agent Kaizen dependencies (compiling pyturso from source).'
-  [ "$built_from_source" -eq 1 ] || note='Installing Agent Kaizen dependencies (pyturso from prebuilt wheel).'
-  ak_run --note "$note" -- "$VENV_PY" -m pip install --prefer-binary "${find_links[@]}" -r "$REPO_ROOT/requirements-kaizen.txt" \
-    || ak_die "pip install of Agent Kaizen dependencies failed (see the command log above)." "$AK_EX_SOFTWARE"
+  if [ "$TOOL_RUST" -eq 1 ]; then
+    # Toolchain available: prefer a wheel, fall back to a source build.
+    ak_run --note "Installing Agent Kaizen dependencies (Turso: prebuilt wheel if available, else source)." -- "$VENV_PY" -m pip install --prefer-binary "${find_links[@]}" -r "$REPO_ROOT/requirements-kaizen.txt" \
+      || ak_die "pip install of Agent Kaizen dependencies failed (see the command log above)." "$AK_EX_SOFTWARE"
+  else
+    # No toolchain: wheel-only, so a missing wheel fails cleanly instead of half-starting a build.
+    ak_run --note "Installing Agent Kaizen dependencies (Turso from its prebuilt wheel)." -- "$VENV_PY" -m pip install --only-binary=:all: "${find_links[@]}" -r "$REPO_ROOT/requirements-kaizen.txt" \
+      || ak_die "No prebuilt Turso wheel for your platform and the Rust build toolchain was not selected. Re-run and choose 'Install Rust + C build toolchain' (or pass --with-rust), or supply a wheel via AK_PYTURSO_WHEEL_URL / a pyturso-*.whl in $WHEEL_CACHE." "$AK_EX_UNAVAILABLE"
+  fi
 
   if [ "$built_from_source" -eq 1 ]; then
-    ak_run --note "Caching the built pyturso wheel so later runs skip the toolchain." -- "$VENV_PY" -m pip wheel pyturso==0.6.1 -w "$WHEEL_CACHE" \
-      || printf '  [warn] could not cache the built pyturso wheel\n' >&2
+    ak_run --note "Caching the built Turso wheel so later runs skip the toolchain." -- "$VENV_PY" -m pip wheel pyturso==0.6.1 -w "$WHEEL_CACHE" \
+      || printf '  [warn] could not cache the built Turso wheel\n' >&2
   fi
 
   # Import smoke check -- the real acceptance test for the native module.
-  "$VENV_PY" -c 'import turso; print("pyturso import OK")' \
-    || ak_die "pyturso installed but failed to import (see the setup command logs)." "$AK_EX_SOFTWARE"
+  "$VENV_PY" -c 'import turso; print("turso import OK")' \
+    || ak_die "Turso installed but failed to import (see the setup command logs)." "$AK_EX_SOFTWARE"
 }
 
 step_skills() {
-  mkdir -p "$DEVROOT_RESOLVED/SKILLS/skills"
+  local store="$DEVROOT_RESOLVED/SKILLS/skills"
+  mkdir -p "$store"
   if [ ! -f "$DEVROOT_RESOLVED/SKILLS/README.md" ]; then
-    printf '# SKILLS store\n\nEmpty by default. Use setup/link-skills.sh to clone skill repos here and link them into .agents/skills + .claude/skills.\n' > "$DEVROOT_RESOLVED/SKILLS/README.md"
+    printf '# SKILLS store\n\nShared skill store for Agent Kaizen projects, populated by the installer. Add more later with setup/link-skills.sh.\n' > "$DEVROOT_RESOLVED/SKILLS/README.md"
   fi
-  printf 'skills store: %s/SKILLS/skills (empty)\n' "$DEVROOT_RESOLVED"
+  ak_install_skills "$REPO_ROOT" "$VENV_PY" "$store"
 }
 
 step_workspace() {
@@ -169,11 +185,11 @@ step_workspace() {
   {
     printf '{\n'
     printf '  "folders": [\n'
-    printf '    { "name": "Agent Kaizen", "path": ".." },\n'
+    printf '    { "name": "%s", "path": ".." },\n' "$WS_LABEL"
     printf '    { "name": "SKILLS", "path": "../../SKILLS" }\n'
     printf '  ],\n'
     printf '  "settings": {\n'
-    printf '    "python.defaultInterpreterPath": "${workspaceFolder:Agent Kaizen}/../Python/venvs/kaizen/bin/python",\n'
+    printf '    "python.defaultInterpreterPath": "${workspaceFolder:%s}/../Python/venvs/kaizen/bin/python",\n' "$WS_LABEL"
     printf '    "python.terminal.activateEnvironment": false,\n'
     printf '    "files.exclude": { "**/__pycache__": true },\n'
     printf '    "search.exclude": { "**/__pycache__": true }\n'
@@ -181,6 +197,13 @@ step_workspace() {
     printf '}\n'
   } > "$WS_FILE"
   printf 'workspace: %s\n' "$WS_FILE"
+  # Convenience launcher (parity with the duplication flow + the Windows installer): open the
+  # workspace in a new VS Code window. On native Linux `code` opens locally; over Remote-WSL open
+  # from the Windows side with `code --remote wsl+<distro> <workspace>`.
+  local launcher="$REPO_ROOT/open-${PROJECT_NAME}-vscode.sh"
+  { printf '#!/usr/bin/env bash\n'; printf 'exec code -n "%s" "$@"\n' "$WS_FILE"; } > "$launcher"
+  chmod +x "$launcher"
+  printf 'launcher : %s\n' "$launcher"
 }
 
 step_db() {
@@ -193,14 +216,14 @@ step_summary() {
   printf '  Repo    : %s\n' "$REPO_ROOT"
   printf '  Venv    : %s\n' "$VENV"
   printf '  Open it : code "%s"\n' "$WS_FILE"
-  printf '  Skills  : optional - run bash setup/link-skills.sh <skills-store-git-url>\n'
+  printf '  Skills  : %s/SKILLS/skills (add more later with setup/link-skills.sh)\n' "$DEVROOT_RESOLVED"
 }
 
 ak_run_step preflight 'Validate git, Python 3.12+, and setup roots' step_preflight
 ak_run_step venv 'Create or validate shared Python venv' step_venv
 ak_run_step rust 'Ensure Rust toolchain for building pyturso' step_rust
 ak_run_step deps 'Install pinned Agent Kaizen dependencies' step_deps
-ak_run_step skills 'Scaffold empty sibling SKILLS store' step_skills
+ak_run_step skills 'Select and install Agent Kaizen skills' step_skills
 ak_run_step workspace 'Generate VS Code workspace' step_workspace
 ak_run_step db 'Initialize local Kaizen DB' step_db
 ak_run_step summary 'Print completion summary' step_summary

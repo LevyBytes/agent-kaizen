@@ -284,7 +284,7 @@ For public repositories, keep `AI/db/` contents private/local unless a report or
 
 ### Optional: Markdown formatting
 
-Markdown in this repo is formatted with [Prettier](https://prettier.io/) settings `proseWrap: preserve` and `printWidth: 100` (the config is kept local, not shipped). Prettier is **optional but recommended**: it is not a required gate (no CI enforcement, and you do not need it to use the harness), but if it is available it keeps docs consistently formatted.
+Markdown in this repo is formatted with [Prettier](https://prettier.io/) settings `proseWrap: never` and `printWidth: 100` (the config is kept local, not shipped). Prettier is **optional but recommended**: it is not a required gate (no CI enforcement, and you do not need it to use the harness), but if it is available it keeps docs consistently formatted.
 
 ```powershell
 npx prettier --check path/to/file.md   # report formatting drift
@@ -293,7 +293,7 @@ npx prettier --write  path/to/file.md   # apply formatting
 
 ## Testing
 
-The harness ships with a standard-library `unittest` suite under [`AI/tests/`](AI/tests/). Each test runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it never reads or writes your real `AI/db/`. The suite currently has 249 tests across 28 modules, including a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a test, a parity suite that fails if the README command table drifts from the CLI alias map, and a doc-examples runner that executes every command example in this README against a scratch database. Run it with the project venv's Python:
+The harness ships with a standard-library `unittest` suite under [`AI/tests/`](AI/tests/). Each test runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it never reads or writes your real `AI/db/`. The suite spans 30 test modules (260+ tests), including a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a test, a parity suite that fails if the README command table drifts from the CLI alias map, and a doc-examples runner that executes every command example in this README against a scratch database. Run it with the project venv's Python:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s AI/tests
@@ -620,7 +620,7 @@ Two rules hold no matter what you enable: skip all three and the deterministic c
 
 **Where does my data live?** In `AI/db/` inside the repo — local, private by default, and under your control. Nothing is uploaded anywhere.
 
-**Is it Windows-only?** No. The project is developed on Windows 11 pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Ubuntu.
+**Is it Windows-only?** No. The project is developed on Windows 11 Pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Ubuntu.
 
 ## Public Repository Safety
 

@@ -1,6 +1,6 @@
 # AI/tests/
 
-Automated tests for the Agent Kaizen harness — 249 tests across 28 modules. Standard-library
+Automated tests for the Agent Kaizen harness — 260+ tests across 30 test modules. Standard-library
 `unittest` only — no extra dependencies beyond the pinned runtime in `requirements-kaizen.txt`.
 (A handful of PDF-guard tests skip unless the opt-in `requirements-docs.txt` backends are installed.)
 
@@ -25,6 +25,10 @@ Tests invoke `sys.executable`, so run them with the project venv's Python (the o
 # Linux / macOS
 ./.venv/bin/python -m unittest discover -s AI/tests
 ```
+
+## Dependency audit (CI parity)
+
+CI runs a second job, `audit`, that scans the pinned dependencies for known advisories; mirror it locally before pushing with `pipx run pip-audit --progress-spinner off -r requirements-kaizen.txt -r requirements-docs.txt` — a clean "No known vulnerabilities found" means the `audit` job will pass too.
 
 ## What is covered
 

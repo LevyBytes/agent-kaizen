@@ -456,6 +456,106 @@ ak_ensure_rust() {
 }
 
 # ---------------------------------------------------------------------------
+# Skills: enumerate the owner's published skills from GitHub, install the ones
+# selected (skill-drafting always) into the shared DEVROOT store, and link them
+# into a project's .agents/.claude. Best-effort -- never fatal. Mirrors the
+# Windows Ensure-Skills so a normal install offers the same skills menu.
+# ---------------------------------------------------------------------------
+ak_install_skills() {
+  # $1 = project root (.agents/.claude live here); $2 = python; $3 = shared skills store dir.
+  local repo="$1" py="$2" store="$3"
+  mkdir -p "$store" "$repo/.agents/skills" "$repo/.claude/skills"
+  if [ "$AK_NO_NETWORK" -eq 1 ] || [ "$AK_NO_EXTERNAL" -eq 1 ]; then
+    printf 'skills: download blocked by safety mode; store left empty (run setup/link-skills.sh later).\n'
+    return 0
+  fi
+  command -v git >/dev/null 2>&1 || { printf 'skills: git not found; skipping.\n'; return 0; }
+  [ -x "$py" ] || py="$(command -v python3 || command -v python || true)"
+  [ -n "$py" ] || { printf 'skills: python not found; skipping.\n'; return 0; }
+
+  local list
+  list="$("$py" - <<'PY' 2>/dev/null
+import json,re,sys,urllib.request
+try:
+    req=urllib.request.Request("https://api.github.com/users/LevyBytes/repos?per_page=100",headers={"User-Agent":"agent-kaizen"})
+    data=json.load(urllib.request.urlopen(req,timeout=20))
+except Exception:
+    sys.exit(0)
+if not isinstance(data,list):
+    sys.exit(0)
+for r in sorted(data,key=lambda x:x.get("name","")):
+    n=r.get("name","")
+    if re.match(r"^AI-SKILL-",n) or re.match(r"^AI-skill-",n):
+        print(re.sub(r"^AI-SKILL-","",re.sub(r"^AI-skill-","skill-",n))+"\t"+r.get("clone_url",""))
+PY
+)" || true
+
+  local -a names=() urls=() want=()
+  local sname surl
+  while IFS=$'\t' read -r sname surl; do
+    [ -n "$sname" ] || continue
+    names+=("$sname"); urls+=("$surl")
+  done <<< "$list"
+  if [ "${#names[@]}" -eq 0 ]; then
+    printf 'skills: none found (GitHub unreachable?); store left empty.\n'
+    return 0
+  fi
+
+  # skill-drafting is always installed; the rest come from the prompt (or none when headless).
+  local i
+  for i in "${!names[@]}"; do [ "${names[$i]}" = "skill-drafting" ] && want+=("$i"); done
+  if [ "$AK_NO_INPUT" -eq 0 ] && [ -t 0 ]; then
+    printf '\nAgent Kaizen skills (skill-drafting is always installed):\n' >&2
+    for i in "${!names[@]}"; do
+      [ "${names[$i]}" = "skill-drafting" ] && continue
+      local mark='   '
+      [ -d "$store/${names[$i]}" ] && mark='[*]'
+      printf '  %2d) %s %s\n' "$((i + 1))" "$mark" "${names[$i]}" >&2
+    done
+    printf "Enter numbers to add (comma-separated), 'all', or Enter for skill-drafting only: " >&2
+    local ans
+    read -r ans || ans=""
+    case "$ans" in
+      all|ALL|a) for i in "${!names[@]}"; do want+=("$i"); done ;;
+      "") : ;;
+      *)
+        local tok
+        local -a sel
+        IFS=', ' read -r -a sel <<< "$ans"
+        for tok in "${sel[@]}"; do
+          case "$tok" in ''|*[!0-9]*) continue ;; esac
+          local idx=$((tok - 1))
+          [ "$idx" -ge 0 ] && [ "$idx" -lt "${#names[@]}" ] && want+=("$idx")
+        done ;;
+    esac
+  else
+    printf 'skills: non-interactive; installing skill-drafting only.\n'
+  fi
+
+  local n url linked=0 m
+  for i in "${want[@]}"; do
+    n="${names[$i]}"
+    url="${urls[$i]}"
+    if [ ! -d "$store/$n" ] && [ -n "$url" ]; then
+      ak_run --note "Cloning skill $n into the shared store." -- git clone --depth 1 "$url" "$store/$n" \
+        || { printf '  [warn] clone failed: %s\n' "$n" >&2; continue; }
+    fi
+    [ -f "$store/$n/SKILL.md" ] || continue
+    for m in "$repo/.agents/skills" "$repo/.claude/skills"; do
+      [ -e "$m/$n" ] || ln -s "$store/$n" "$m/$n"
+    done
+    linked=$((linked + 1))
+  done
+  printf '%d skill(s) linked into .agents/skills and .claude/skills (store: %s).\n' "$linked" "$store"
+
+  local builder="$store/skill-drafting/scripts/skill_builder.py"
+  if [ -f "$builder" ]; then
+    ak_run --note "Regenerating the skill index." -- "$py" "$builder" index "$repo/.claude/skills" --mirror "$repo/.agents/skills" \
+      || printf '  [warn] skill index regeneration skipped.\n' >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Failure report (mirror of the Windows Write-AkFailureReport)
 # ---------------------------------------------------------------------------
 ak_failure_report() {

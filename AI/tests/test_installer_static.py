@@ -96,6 +96,16 @@ class InstallerStaticTest(unittest.TestCase):
             "Update-AkBannerActivity",        # sticky banner: throttled live current-download line
             "NpmGlobalDir",                   # DEVROOT npm global packages dir
             "npm-global",                     # ...added to PATH + npm config set prefix (SC parity)
+            # Rename + in-installer duplication + smart toolselect (this round)
+            "$ProjectName",                   # -ProjectName rename param (folder + workspace name)
+            "__AK_WS_LABEL__",                # de-hardcoded workspace label placeholder
+            "Resolve-AkProjectMode",          # fresh-rename vs duplicate decision, before any tool prompt
+            "Get-AkExistingProject",          # detect a git-backed agent-kaizen to duplicate from
+            "Invoke-AkDuplication",           # duplication flow (link engine, copy customizable, own DB)
+            "Invoke-AkSkillsInto",            # skills impl shared by normal setup + duplication
+            "Test-AkTursoSatisfied",          # skip the Rust/Build-Tools prompt when already satisfied
+            "New-AkLink",                     # junction dirs / symlink-or-copy files for the shared engine
+            "KAIZEN_REPO_ROOT",               # kaizen.cmd wrapper isolates the duplicated project's DB
         ):
             self.assertIn(token, self.text, f"expected fix token missing: {token}")
 
