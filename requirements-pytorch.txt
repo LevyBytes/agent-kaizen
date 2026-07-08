@@ -5,6 +5,16 @@
 #     pip install -r requirements-pytorch.txt
 #
 # torch is platform/GPU-specific. For CUDA, install the matching torch wheel from pytorch.org FIRST
-# (see setup/PYTORCH.md), then run this file (sentence-transformers will reuse the installed torch).
+# (see setup/PYTORCH.md), then run this file (the packages below reuse the installed torch).
 # Redirect the multi-GB HuggingFace weight cache out of the repo via HF_HOME (see setup/PYTORCH.md).
+#
+# All of these power OPT-IN, advisory, GPU-first backends (defaults sized for a 12 GB GPU):
+#   - sentence-transformers: embeddings + the semantic chunker AND the cross-encoder reranker (E4 --rerank).
+#   - transformers + accelerate + bitsandbytes: the in-process transformers text backend (KAIZEN_TEXT_BACKEND=transformers)
+#     for B2/B4, incl. 4-bit loading. The lighter path for the 9B default is its GGUF Q4_K_M via Ollama.
+#   - gliner2: the advisory GLiNER2 PII scanner (B5); it augments, never replaces, the regex redaction gate.
 sentence-transformers>=3.0,<4.0
+transformers>=4.44
+accelerate>=0.33
+bitsandbytes>=0.43; platform_system != "Darwin"
+gliner2>=0.1

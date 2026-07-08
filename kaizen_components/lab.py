@@ -135,7 +135,7 @@ def add_proposal(args: Any) -> dict[str, Any]:
         conn.execute(
             "INSERT INTO improvement_proposals "
             "(id, created_at, contract, status, title, summary, body, baseline_score, candidate_score, "
-            "metric, payload_json, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "metric, payload_json, content_hash, is_test) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -149,6 +149,7 @@ def add_proposal(args: Any) -> dict[str, Any]:
                 metric,
                 payload_json,
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -188,4 +189,108 @@ def proposal_report(args: Any) -> dict[str, Any]:
         "promotion_path": "human review -> promote underlying learning via L2/L3 (GOTCHA -> LEARNING -> LEARNED)",
         "path": repo_relative(path),
         "sha256": file_sha256(path),
+    }
+
+
+def lab_evaluate(args: Any) -> dict[str, Any]:
+    """O4: advisory LLM-judge evaluation of a contract's proposals against its eval cases.
+
+    Writes a model ``candidate_score`` + one ``source='model'`` eval_score per proposal (each linked
+    to a ``kind='judge'`` trace). ADVISORY ONLY: it never changes ``status`` and never promotes --
+    ``O3`` then reorders and a human promotes the winner via ``L2``/``L3``.
+    """
+    from .backends import get_text_backend
+    from .model_ops import _judge_candidate, _record_judge_trace
+    from .trace_records import write_eval_score
+
+    backend = get_text_backend()
+    if backend is None:
+        raise KaizenDenied(
+            "DENIED_BACKEND_UNCONFIGURED",
+            {"required_action": "set KAIZEN_LLM_MODEL (or KAIZEN_TEXT_BACKEND=transformers) -- see setup/OLLAMA.md"},
+            exit_code=2,
+        )
+    contract = _require_contract(args)
+    limit = int(getattr(args, "limit", None) or 50)
+    category = getattr(args, "category", None)
+    if category:
+        cases = fetch_all(
+            "SELECT id, summary, expected_json, body FROM eval_cases WHERE category = ? ORDER BY created_at DESC LIMIT ?",
+            (category, limit),
+        )
+    else:
+        cases = fetch_all(
+            "SELECT id, summary, expected_json, body FROM eval_cases ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+    if not cases:
+        raise KaizenDenied(
+            "DENIED_NO_EVAL_CASES",
+            {"required_action": "add eval cases with Q3 (eval-case-add) before running O4"},
+            exit_code=2,
+        )
+    proposals = fetch_all(
+        "SELECT id, title, body FROM improvement_proposals WHERE contract = ? ORDER BY created_at DESC",
+        (contract,),
+    )
+    if not proposals:
+        return {"status": "OK", "contract": contract, "evaluated": 0, "note": "no proposals for this contract (record them with O2)."}
+
+    metric = getattr(args, "metric", None) or "model_judge"
+    evaluated: list[dict[str, Any]] = []
+    for pid, ptitle, pbody in proposals:
+        candidate = pbody or ptitle or ""
+        scores: list[float] = []
+        agg = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0, "raw": []}
+        for _cid, csummary, cexpected, cbody in cases:
+            rubric = cexpected or cbody or csummary
+            judged = _judge_candidate(backend, rubric, candidate)
+            if judged["verdict"]["score"] is not None:
+                scores.append(judged["verdict"]["score"])
+            usage = judged["usage"]
+            agg["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            agg["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            agg["total_tokens"] += int(usage.get("total_tokens") or 0)
+            agg["latency_ms"] += judged["latency_ms"]
+            agg["raw"].append(judged["raw_text"])
+        mean = round(sum(scores) / len(scores), 4) if scores else None
+        summary = f"O4 advisory judge of a proposal over {len(cases)} eval case(s); mean={mean}."
+        judged_agg = {
+            "usage": {k: agg[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")},
+            "latency_ms": agg["latency_ms"],
+            "raw_text": "\n---\n".join(agg["raw"]),
+            "model": backend.model,
+        }
+        is_test = 1 if getattr(args, "test", False) else 0
+        trace_event_id = _record_judge_trace(
+            backend.name, backend.model, judged_agg, getattr(args, "task_id", None), getattr(args, "trace_id", None),
+            summary, is_test
+        )
+        if mean is not None:
+            def _update(conn: Any, _attempt: int, _pid: str = pid, _mean: float = mean) -> None:
+                conn.execute("UPDATE improvement_proposals SET candidate_score = ? WHERE id = ?", (_mean, _pid))
+
+            write_tx(_update)
+        value, data_type = (mean, "numeric") if mean is not None else ("no-numeric-verdict", "categorical")
+        score = write_eval_score(
+            {
+                "trace_event_id": trace_event_id,
+                "name": metric,
+                "value": value,
+                "data_type": data_type,
+                "source": "model",
+                "comment": f"contract={contract}"[:200],
+            },
+            is_test=is_test,
+        )
+        evaluated.append({"proposal_id": pid, "mean_score": mean, "cases": len(cases), "trace_event_id": trace_event_id, "score_id": score["id"]})
+
+    return {
+        "status": "OK",
+        "advisory": True,
+        "contract": contract,
+        "evaluated": len(evaluated),
+        "cases": len(cases),
+        "proposals": evaluated,
+        "note": "advisory only; a human promotes the winner via L2/L3.",
     }

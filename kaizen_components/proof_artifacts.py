@@ -45,8 +45,8 @@ def add_artifact(args: Any) -> dict[str, Any]:
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO artifacts "
-            "(id, created_at, task_id, kind, path, sha256, bytes, summary, body, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, created_at, task_id, kind, path, sha256, bytes, summary, body, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -58,6 +58,7 @@ def add_artifact(args: Any) -> dict[str, Any]:
                 summary,
                 body,
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -190,8 +191,8 @@ def add_verification(args: Any) -> dict[str, Any]:
         conn.execute(
             "INSERT INTO verification_events "
             "(id, created_at, task_id, proof_id, conclusion, evidence_locations_json, findings_json, remedies_json, "
-            "severity, scope_label, actionability, summary, body, artifact_ids_json, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "severity, scope_label, actionability, summary, body, artifact_ids_json, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -208,6 +209,7 @@ def add_verification(args: Any) -> dict[str, Any]:
                 body,
                 json.dumps(artifact_ids),
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -275,8 +277,8 @@ def add_eval_case(args: Any) -> dict[str, Any]:
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO eval_cases "
-            "(id, created_at, category, scope, status, title, summary, body, fixture_path, expected_json, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, created_at, category, scope, status, title, summary, body, fixture_path, expected_json, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -289,6 +291,7 @@ def add_eval_case(args: Any) -> dict[str, Any]:
                 getattr(args, "path", None),
                 _text_arg(args, "expected_json", "") or None,
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -307,8 +310,8 @@ def add_eval_run(args: Any) -> dict[str, Any]:
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO eval_runs "
-            "(id, created_at, eval_case_id, status, summary, body, artifact_ids_json, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, created_at, eval_case_id, status, summary, body, artifact_ids_json, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -318,6 +321,7 @@ def add_eval_run(args: Any) -> dict[str, Any]:
                 body,
                 json.dumps(_json_arg(args, "artifact_ids", [])),
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -344,8 +348,8 @@ def add_anti_pattern(args: Any) -> dict[str, Any]:
         conn.execute(
             "INSERT INTO anti_patterns "
             "(id, created_at, scope, status, title, symptom, maintainability_harm, trigger_evidence, "
-            "preferred_correction, valid_exceptions, verification, summary, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "preferred_correction, valid_exceptions, verification, summary, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -360,6 +364,7 @@ def add_anti_pattern(args: Any) -> dict[str, Any]:
                 values["verification"],
                 values["summary"],
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 

@@ -6,6 +6,7 @@ cleanly rather than crashing."""
 from __future__ import annotations
 
 import email.message
+import os
 import socket
 import ssl
 import sys
@@ -131,7 +132,7 @@ class _FakeEmbedBackend:
         self.drop_one = drop_one
         self.batch_sizes: list[int] = []
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         self.batch_sizes.append(len(texts))
         count = len(texts) - 1 if self.drop_one else len(texts)
         # Encode the index so order can be asserted after concatenation.
@@ -163,7 +164,7 @@ class BackendDoctorTest(IsolatedDBTest):
         self.assertFalse(p["text"]["configured"], p)
 
     def test_doctor_configured_but_unreachable(self):
-        env = {"KAIZEN_EMBED_MODEL": "nomic-embed-text", "KAIZEN_EMBED_BASE_URL": "http://127.0.0.1:6/v1"}
+        env = {"KAIZEN_EMBED_MODEL": "hf.co/mradermacher/KaLM-embedding-multilingual-mini-instruct-v2.5-GGUF:Q8_0", "KAIZEN_EMBED_BASE_URL": "http://127.0.0.1:6/v1"}
         rc, p = self.kz("B1", env=env)
         self.assertEqual(rc, 0, p)
         self.assertTrue(p["embedding"]["configured"], p)
@@ -204,6 +205,53 @@ class EvidenceNoBackendTest(IsolatedDBTest):
         self.assertEqual(rc3, 0, q)
         self.assertEqual(q.get("mode"), "like", q)         # graceful lexical baseline
         self.assertTrue(any("bravo" in (r.get("snippet") or "") for r in q.get("records", [])), q)
+
+
+class EmbedQueryPromptTest(unittest.TestCase):
+    """The in-process embedder applies a query instruction to QUERIES (is_query=True) but NEVER to
+    documents -- so instruction-tuned defaults (F2LLM, Qwen3-Embedding) reach their retrieval ceiling
+    on E4 --semantic while E1/E3 document embeddings stay unprompted. Encoder is stubbed (no weights)."""
+
+    def _backend(self, prompts):
+        from kaizen_components.backends.sentence_transformers_backend import SentenceTransformersBackend
+
+        calls: list[dict] = []
+
+        class _Enc:
+            def __init__(self):
+                self.prompts = prompts
+
+            def encode(self, texts, **kw):
+                calls.append(kw)
+                return [[0.0, 0.0, 0.0, 0.0] for _ in texts]
+
+        b = SentenceTransformersBackend(model="fake")
+        b._encoder = _Enc()  # _load() returns this -> no sentence_transformers import, no weights
+        return b, calls
+
+    def test_document_embed_never_prompts(self):
+        b, calls = self._backend({"query": "Instruct: ...\nQuery: "})
+        b.embed(["a chunk of a document"])  # is_query defaults False
+        self.assertNotIn("prompt", calls[0])
+        self.assertNotIn("prompt_name", calls[0])
+
+    def test_query_uses_models_configured_prompt(self):
+        b, calls = self._backend({"query": "Instruct: ...\nQuery: "})
+        b.embed(["a search query"], is_query=True)
+        self.assertEqual(calls[0].get("prompt_name"), "query")
+
+    def test_env_override_beats_model_prompt(self):
+        b, calls = self._backend({"query": "model prompt"})
+        with mock.patch.dict(os.environ, {"KAIZEN_EMBED_QUERY_PROMPT": "OVERRIDE: "}):
+            b.embed(["q"], is_query=True)
+        self.assertEqual(calls[0].get("prompt"), "OVERRIDE: ")
+        self.assertNotIn("prompt_name", calls[0])
+
+    def test_model_without_query_prompt_stays_plain(self):
+        b, calls = self._backend({})  # granite-like: no query prompt -> unchanged behavior
+        b.embed(["q"], is_query=True)
+        self.assertNotIn("prompt", calls[0])
+        self.assertNotIn("prompt_name", calls[0])
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 # Light setup for the Ollama model backend (B* / model-*).
 set -euo pipefail
 
-EMBED_MODEL="nomic-embed-text"
-CHAT_MODEL="llama3.2"
+EMBED_MODEL="hf.co/mradermacher/KaLM-embedding-multilingual-mini-instruct-v2.5-GGUF:Q8_0"
+CHAT_MODEL="hf.co/unsloth/Qwen3.5-9B-GGUF:Q4_K_M"
 DEVROOT_ARG=""
 LIST_STEPS=0
 EMIT_PLAN_JSON=""

@@ -19,13 +19,14 @@ def add_plan(args: Any) -> dict[str, Any]:
     revision_id = new_id("pr")
     created = now()
     status = getattr(args, "status", None) or "draft"
+    is_test = 1 if getattr(args, "test", False) else 0
     content_hash = utc_text_hash({"id": record_id, "title": title, "summary": summary, "body": body})
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO plans "
             "(id, task_id, created_at, updated_at, status, title, summary, body, source_command, writer_role, "
-            "content_hash, current_revision_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "content_hash, current_revision_id, is_test) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 getattr(args, "task_id", None),
@@ -39,6 +40,7 @@ def add_plan(args: Any) -> dict[str, Any]:
                 getattr(args, "writer_role", None) or "agent",
                 content_hash,
                 revision_id,
+                is_test,
             ),
         )
         conn.execute(

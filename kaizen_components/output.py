@@ -7,7 +7,9 @@ from typing import Any
 
 def emit(payload: dict[str, Any], *, as_json: bool = False) -> int:
     if as_json:
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        # ensure_ascii=True: escape non-ASCII to \uXXXX so --json never crashes writing to a
+        # non-UTF-8 stream (Windows cp1252 console/pipe). Still valid JSON; parsers decode it back.
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
         return 0
     status = payload.get("status", "OK")
     message = payload.get("message")
@@ -23,7 +25,7 @@ def emit(payload: dict[str, Any], *, as_json: bool = False) -> int:
 
 def emit_error(payload: dict[str, Any], *, as_json: bool = False) -> int:
     if as_json:
-        print(json.dumps(payload, indent=2, ensure_ascii=False), file=sys.stderr)
+        print(json.dumps(payload, indent=2, ensure_ascii=True), file=sys.stderr)
     else:
         code = payload.get("code", "ERROR")
         action = payload.get("required_action")

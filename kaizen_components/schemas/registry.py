@@ -28,7 +28,7 @@ KAIZEN_ENUMS: dict[str, list[str]] = {
         "VERIFICATION_FAILED",
         "PROOF_RECORDED",
     ],
-    "trace_kind": ["model_call", "tool_call", "evidence_read", "verifier", "subagent", "generative_run"],
+    "trace_kind": ["model_call", "tool_call", "evidence_read", "verifier", "subagent", "generative_run", "judge"],
     "trace_level": ["debug", "default", "warning", "error"],
     "score_data_type": ["numeric", "categorical", "boolean"],
     "score_source": ["deterministic", "human", "model"],
@@ -44,9 +44,14 @@ KAIZEN_ENUMS: dict[str, list[str]] = {
         "learning_regression",
     ],
     "extraction_method": ["native", "pdftext", "ocr", "llm", "manual"],
+    # 'neural' is intentionally NOT implemented and stays a reserved, documented value. The peer-reviewed
+    # evidence (Qu, Tu & Bao, "Is Semantic Chunking Worth the Computational Cost?", Findings of NAACL 2025;
+    # arXiv 2410.13070) finds semantic/clustering chunking not consistently worth its cost over fixed-size
+    # on real corpora, so 'recursive' (fixed-size) is the supported default.
     "chunker": ["token", "sentence", "recursive", "code", "semantic", "neural"],
     "authority_tier": ["normative", "official_docs", "implementation", "design_guidance"],
     "generative_status": ["queued", "running", "completed", "failed"],
+    "generative_route": ["api", "mcp"],
     "gateway_event_type": ["comfyui_run"],
 }
 
@@ -190,6 +195,21 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "candidate_score": {"type": "float"},
         },
     },
+    "pii_scan": {
+        "required": ["regex_hit_count", "model_hit_count", "summary"],
+        "allow_extra": False,
+        "fields": {
+            "task_id": {"type": "str"},
+            "trace_id": {"type": "str"},
+            "source_ref": {"type": "str", "max_words": 10},
+            "regex_hit_count": {"type": "int", "min": 0},
+            "model_hit_count": {"type": "int", "min": 0},
+            "hits": {"type": "list"},
+            "model": {"type": "str", "max_words": 20},
+            "provider": {"type": "str", "max_words": 20},
+            "summary": {"type": "str", "summary": True},
+        },
+    },
     "generative_run": {
         "required": ["backend", "template", "workflow_hash", "status", "summary"],
         "allow_extra": False,
@@ -208,6 +228,19 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "output_dir": {"type": "str"},
             "latency_ms": {"type": "int", "min": 0},
             "summary": {"type": "str", "summary": True},
+        },
+    },
+    "generative_run_route": {
+        "required": ["run_id", "route"],
+        "allow_extra": False,
+        "fields": {
+            "run_id": {"type": "str"},
+            "route": {"type": "str", "enum": KAIZEN_ENUMS["generative_route"]},
+            "runtime_profile": {"type": "str", "max_words": 40},
+            "mcp_candidate": {"type": "str", "max_words": 10},
+            "mcp_version": {"type": "str", "max_words": 10},
+            "ab_pair_id": {"type": "str"},
+            "payload": {"type": "dict"},
         },
     },
     "gateway_event": {

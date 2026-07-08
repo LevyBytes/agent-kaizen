@@ -401,7 +401,8 @@ DDL = [
         chunk_count INTEGER,
         summary TEXT NOT NULL,
         body TEXT NOT NULL,
-        content_hash TEXT NOT NULL
+        content_hash TEXT NOT NULL,
+        is_test INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -435,8 +436,6 @@ DDL = [
         context TEXT,
         chunker TEXT NOT NULL,
         backend TEXT,
-        embedding BLOB,
-        embedding_model TEXT,
         neighbor_prev_id TEXT,
         neighbor_next_id TEXT,
         content_hash TEXT NOT NULL
@@ -469,7 +468,8 @@ DDL = [
         redaction_status TEXT,
         summary TEXT NOT NULL,
         body TEXT NOT NULL,
-        content_hash TEXT NOT NULL
+        content_hash TEXT NOT NULL,
+        is_test INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -525,7 +525,141 @@ DDL = [
         content_hash TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS pii_scan (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        task_id TEXT,
+        trace_id TEXT,
+        source_ref TEXT,
+        regex_hit_count INTEGER NOT NULL,
+        model_hit_count INTEGER NOT NULL,
+        hits_json TEXT NOT NULL,
+        model TEXT,
+        provider TEXT,
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        is_test INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    # Per-(chunk, model) embedding index (additive; SCHEMA_VERSION stays 1). Replaces the single inline
+    # evidence_chunks.embedding/embedding_model: one row per model lets several embedders index the
+    # same corpus at once, so an embedder swap is a background/reversible re-index, not a blocking
+    # full re-vector. evidence_chunks.text stays the source of truth; these rows are a rebuildable
+    # derived index. `embedding` is a Turso vector32() BLOB. is_test mirrors the parent document so
+    # K7 purge cascades (by chunk -> document is_test) and its own is_test=1 rows are removable.
+    """
+    CREATE TABLE IF NOT EXISTS chunk_embeddings (
+        chunk_id        TEXT NOT NULL,
+        embedding_model TEXT NOT NULL,
+        dim             INTEGER NOT NULL,
+        embedding       BLOB NOT NULL,
+        created_at      TEXT NOT NULL,
+        is_test         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chunk_id, embedding_model)
+    )
+    """,
+    # Durable key/value settings (additive; SCHEMA_VERSION stays 1). Holds `active_embedding_model` (the model E4/O5 read
+    # for retrieval), so the active index is a stored fact, not an env-var guess. Config, NOT
+    # is_test-scoped: excluded from the K7 purge.
+    """
+    CREATE TABLE IF NOT EXISTS db_settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    # Route/A-B execution metadata for generative runs (one row per run). Child of
+    # generative_runs: route lane (api|mcp), managed-runtime profile, MCP candidate identity,
+    # and the ab_pair_id grouping the two runs of a Y9 pair. payload_json reserves room for
+    # future route fields without another DDL change. is_test mirrors the parent run so K7
+    # purge removes it with the run. Additive-only: no SCHEMA_VERSION bump (owner freeze).
+    """
+    CREATE TABLE IF NOT EXISTS generative_run_routes (
+        run_id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        route TEXT NOT NULL,
+        runtime_profile TEXT,
+        mcp_candidate TEXT,
+        mcp_version TEXT,
+        ab_pair_id TEXT,
+        payload_json TEXT,
+        is_test INTEGER NOT NULL DEFAULT 0
+    )
+    """,
 ]
+
+
+# Additive columns applied to EXISTING DBs (CREATE TABLE IF NOT EXISTS never alters a live table).
+# Idempotent: applied only when PRAGMA table_info shows the column absent. (table, column, type-def).
+# These carry the is_test marker so live-integration test rows can be purged safely (K7 purge-test).
+# is_test marks a row as a removable live-test record (K7 purge-test). Every ROOT record table an op
+# writes carries it; revision/child tables inherit removal via their parent link (below), so they need
+# no column. Added via the ADDITIVE path (not the CREATE TABLE DDL), so ddl_sha256 / the manifest is
+# UNCHANGED -- no SCHEMA_VERSION bump and no K1 --restamp-manifest required.
+_IS_TEST = "INTEGER NOT NULL DEFAULT 0"
+# Root record tables that carry is_test (evidence_documents/trace_events/pii_scan already had it).
+TEST_ROOT_TABLES: tuple[str, ...] = (
+    "gotcha", "learning", "learned", "tasks", "plans", "ledger_events", "verification_events",
+    "artifacts", "eval_cases", "eval_runs", "eval_scores", "source_locks", "irl_reviews",
+    "subagent_packets", "diagnostic_packets", "anti_patterns", "agentgateway_events", "reports",
+    "private_policy", "improvement_proposals", "generative_runs",
+    "evidence_documents", "trace_events", "pii_scan",
+)
+ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [(t, "is_test", _IS_TEST) for t in TEST_ROOT_TABLES]
+
+
+# Test-record purge cascade (K7): delete children by their parent link first, then every flagged root.
+# The schema ships no FK constraints, so order is logical-only, but children-first keeps the intent clear.
+# Every row removed is either is_test=1 or a descendant of an is_test=1 root.
+TEST_PURGE_SQL: list[str] = [
+    # revision tables -> by their owning record's is_test
+    "DELETE FROM gotcha_revision WHERE gotcha_id IN (SELECT id FROM gotcha WHERE is_test = 1)",
+    "DELETE FROM learning_revision WHERE learning_id IN (SELECT id FROM learning WHERE is_test = 1)",
+    "DELETE FROM learned_revision WHERE learned_id IN (SELECT id FROM learned WHERE is_test = 1)",
+    "DELETE FROM task_revision WHERE task_id IN (SELECT id FROM tasks WHERE is_test = 1)",
+    "DELETE FROM plan_revision WHERE plan_id IN (SELECT id FROM plans WHERE is_test = 1)",
+    "DELETE FROM private_policy_revision WHERE policy_id IN (SELECT id FROM private_policy WHERE is_test = 1)",
+    # evidence children -> by their document's is_test (chunk_embeddings FIRST: it maps chunk->document
+    # through evidence_chunks, which the next statement deletes -- reverse the order and the mapping is gone).
+    "DELETE FROM chunk_embeddings WHERE is_test = 1 "
+    "OR chunk_id IN (SELECT id FROM evidence_chunks WHERE document_id IN "
+    "(SELECT id FROM evidence_documents WHERE is_test = 1))",
+    "DELETE FROM evidence_chunks WHERE document_id IN (SELECT id FROM evidence_documents WHERE is_test = 1)",
+    "DELETE FROM evidence_blocks WHERE document_id IN (SELECT id FROM evidence_documents WHERE is_test = 1)",
+    # eval_scores/eval_runs -> own flag OR any is_test parent link
+    "DELETE FROM eval_scores WHERE is_test = 1 "
+    "OR trace_event_id IN (SELECT id FROM trace_events WHERE is_test = 1) "
+    "OR eval_run_id IN (SELECT id FROM eval_runs WHERE is_test = 1) "
+    "OR verification_id IN (SELECT id FROM verification_events WHERE is_test = 1)",
+    "DELETE FROM eval_runs WHERE is_test = 1 OR eval_case_id IN (SELECT id FROM eval_cases WHERE is_test = 1)",
+    # roots
+    "DELETE FROM gotcha WHERE is_test = 1",
+    "DELETE FROM learning WHERE is_test = 1",
+    "DELETE FROM learned WHERE is_test = 1",
+    "DELETE FROM tasks WHERE is_test = 1",
+    "DELETE FROM plans WHERE is_test = 1",
+    "DELETE FROM ledger_events WHERE is_test = 1",
+    "DELETE FROM verification_events WHERE is_test = 1",
+    "DELETE FROM artifacts WHERE is_test = 1",
+    "DELETE FROM eval_cases WHERE is_test = 1",
+    "DELETE FROM source_locks WHERE is_test = 1",
+    "DELETE FROM irl_reviews WHERE is_test = 1",
+    "DELETE FROM subagent_packets WHERE is_test = 1",
+    "DELETE FROM diagnostic_packets WHERE is_test = 1",
+    "DELETE FROM anti_patterns WHERE is_test = 1",
+    "DELETE FROM agentgateway_events WHERE is_test = 1",
+    "DELETE FROM reports WHERE is_test = 1",
+    "DELETE FROM private_policy WHERE is_test = 1",
+    "DELETE FROM improvement_proposals WHERE is_test = 1",
+    "DELETE FROM generative_run_routes WHERE is_test = 1 OR run_id IN (SELECT id FROM generative_runs WHERE is_test = 1)",
+    "DELETE FROM generative_runs WHERE is_test = 1",
+    "DELETE FROM evidence_documents WHERE is_test = 1",
+    "DELETE FROM trace_events WHERE is_test = 1",
+    "DELETE FROM pii_scan WHERE is_test = 1",
+]
+# Count query per root table so K7 can report what it removed (captured before the deletes run).
+TEST_COUNT_SQL: dict[str, str] = {t: f"SELECT COUNT(*) FROM {t} WHERE is_test = 1" for t in TEST_ROOT_TABLES}
 
 
 INDEXES = [
@@ -546,12 +680,15 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_evidence_documents_source ON evidence_documents(source_lock_id)",
     "CREATE INDEX IF NOT EXISTS idx_evidence_blocks_document ON evidence_blocks(document_id)",
     "CREATE INDEX IF NOT EXISTS idx_evidence_chunks_document ON evidence_chunks(document_id)",
+    "CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model ON chunk_embeddings(embedding_model)",
+    "CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_chunk ON chunk_embeddings(chunk_id)",
     "CREATE INDEX IF NOT EXISTS idx_trace_events_task ON trace_events(task_id)",
     "CREATE INDEX IF NOT EXISTS idx_trace_events_trace ON trace_events(trace_id)",
     "CREATE INDEX IF NOT EXISTS idx_eval_scores_trace ON eval_scores(trace_event_id)",
     "CREATE INDEX IF NOT EXISTS idx_improvement_proposals_contract ON improvement_proposals(contract)",
     "CREATE INDEX IF NOT EXISTS idx_generative_runs_backend ON generative_runs(backend)",
     "CREATE INDEX IF NOT EXISTS idx_generative_runs_task ON generative_runs(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_gen_routes_pair ON generative_run_routes(ab_pair_id)",
 ]
 
 
@@ -568,7 +705,7 @@ def ddl_sha256() -> str:
 FTS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_evidence_chunks_fts ON evidence_chunks USING fts (text)"
 
 
-# Referential-integrity map for the read-only K1 --integrity scan (SCHEMA v1 ships no FK
+# Referential-integrity map for the read-only K1 --integrity scan (the schema ships no FK
 # constraints, so this is application-level). Each entry is child (table, column) -> parent
 # (table, column); a non-NULL child value with no matching parent row is an orphan. Kept
 # CONSERVATIVE on purpose: only clear structural-ownership and promotion-lineage id links.
@@ -594,6 +731,7 @@ REFERENCES: list[tuple[str, str, str, str]] = [
     ("eval_scores", "eval_run_id", "eval_runs", "id"),
     ("eval_scores", "verification_id", "verification_events", "id"),
     ("generative_runs", "workflow_artifact_id", "artifacts", "id"),
+    ("generative_run_routes", "run_id", "generative_runs", "id"),
 ]
 
 
@@ -632,9 +770,13 @@ def schema_manifest() -> dict[str, object]:
             "evidence_documents",
             "evidence_blocks",
             "evidence_chunks",
+            "chunk_embeddings",
+            "db_settings",
             "trace_events",
             "eval_scores",
             "improvement_proposals",
             "generative_runs",
+            "generative_run_routes",
+            "pii_scan",
         ],
     }

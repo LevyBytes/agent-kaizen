@@ -70,14 +70,15 @@ def add_trace_event(args: Any) -> dict[str, Any]:
     created = now()
     content_hash = utc_text_hash({"id": record_id, **payload})
     tags_json = json.dumps(payload.get("tags", []))
+    is_test = 1 if getattr(args, "test", False) else 0
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO trace_events "
             "(id, created_at, task_id, trace_id, parent_event_id, kind, name, level, environment, session_id, "
             "status, status_message, model, provider, prompt_tokens, completion_tokens, total_tokens, cost, "
-            "latency_ms, tags_json, input_ref, output_ref, redaction_status, summary, body, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "latency_ms, tags_json, input_ref, output_ref, redaction_status, summary, body, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -105,6 +106,7 @@ def add_trace_event(args: Any) -> dict[str, Any]:
                 summary,
                 body,
                 content_hash,
+                is_test,
             ),
         )
 
@@ -112,8 +114,82 @@ def add_trace_event(args: Any) -> dict[str, Any]:
     return {"status": "OK", "id": record_id, "content_hash": content_hash}
 
 
+_MODEL_CALL_LANES = ("embedding", "rerank", "pii", "text")
+
+
+def record_model_call(
+    *,
+    lane: str,
+    model: str | None,
+    provider: str | None,
+    latency_ms: int,
+    count: int | None = None,
+    dimension: int | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    is_test: int = 0,
+    summary: str | None = None,
+) -> str | None:
+    """Best-effort observability trace for a model USE that B2/B4 do not already record -- the
+    embedder, reranker, and PII lanes. Writes ``kind='model_call'`` with ``name=<lane>`` so the B6
+    monitor's activity feed and ``T*`` history reflect ALL model usage, not just text-gen/judge.
+
+    ADVISORY ONLY: it stores counts + latency (never the embedded/scanned text), and a write failure
+    is swallowed so observability can never break the ingest/search/dedup op that triggered it.
+    Returns the trace id, or None on an unknown lane / swallowed write error.
+    """
+    if lane not in _MODEL_CALL_LANES:
+        return None
+    latency_ms = int(latency_ms)
+    if summary is None:
+        parts = [lane]
+        if count is not None:
+            parts.append(f"{count} item{'' if count == 1 else 's'}")
+        if dimension is not None:
+            parts.append(f"dim {dimension}")
+        parts.append(f"{latency_ms}ms")
+        summary = "model use: " + ", ".join(parts)
+    payload = {
+        "kind": "model_call",
+        "name": lane,
+        "model": model,
+        "provider": provider,
+        "latency_ms": latency_ms,
+        "level": "default",
+        "status": "recorded",
+        "summary": summary,
+    }
+    try:
+        validate_record("trace_event", {k: v for k, v in payload.items() if v is not None})
+        record_id = new_id("te")
+        created = now()
+        content_hash = utc_text_hash({"id": record_id, **{k: v for k, v in payload.items() if v is not None}})
+
+        def op(conn: Any, _attempt: int) -> None:
+            conn.execute(
+                "INSERT INTO trace_events "
+                "(id, created_at, task_id, trace_id, kind, name, level, status, model, provider, "
+                "latency_ms, redaction_status, summary, body, content_hash, is_test) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record_id, created, task_id, trace_id, "model_call", lane, "default", "recorded",
+                    model, provider, latency_ms, "scanned_clean", summary, "", content_hash, is_test,
+                ),
+            )
+
+        write_tx(op)
+        return record_id
+    except Exception:  # noqa: BLE001 -- observability must never break the op it traces
+        return None
+
+
 def add_eval_score(args: Any) -> dict[str, Any]:
-    payload = _payload_from_args(args)
+    return write_eval_score(_payload_from_args(args), is_test=1 if getattr(args, "test", False) else 0)
+
+
+def write_eval_score(payload: dict[str, Any], *, is_test: int = 0) -> dict[str, Any]:
+    """Validate + write one eval_scores row from an explicit payload (reused by B4/O4). ``is_test``
+    marks the row removable (K7); B4/O4 rows also cascade-delete via their is_test judge trace."""
     validate_record("eval_score", payload)
 
     value = payload["value"]
@@ -160,8 +236,8 @@ def add_eval_score(args: Any) -> dict[str, Any]:
         conn.execute(
             "INSERT INTO eval_scores "
             "(id, created_at, trace_event_id, eval_run_id, verification_id, name, value_num, value_label, "
-            "data_type, source, comment, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "data_type, source, comment, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -175,6 +251,7 @@ def add_eval_score(args: Any) -> dict[str, Any]:
                 payload["source"],
                 payload.get("comment"),
                 content_hash,
+                1 if is_test else 0,
             ),
         )
 

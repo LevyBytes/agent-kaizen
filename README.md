@@ -25,6 +25,7 @@ Proof is in the pudding: record writes land in under 30 ms, a full session-start
 ## Contents
 
 - [Agent Kaizen](#agent-kaizen)
+  - [Benchmarks Preview](#benchmarks-preview)
   - [Contents](#contents)
   - [Reading Path](#reading-path)
   - [The Kaizen System](#the-kaizen-system)
@@ -178,7 +179,7 @@ This is a plain-language summary, not legal advice — see [`LICENSE`](LICENSE) 
 - Windows 10+ with PowerShell 5.1+, or macOS / Linux with a POSIX shell.
 - Python 3.12 or newer with `venv` support (the installers can install it for you). 3.12 is the CI-tested baseline; the installers require at least 3.12.
 - git 2.20+.
-- ~2 GB free RAM for the core harness; 8 GB+ recommended only if you enable the optional PyTorch/Ollama/ComfyUI backends.
+- ~2 GB free RAM for the core harness; a single GPU with **12 GB VRAM** if you enable the optional PyTorch/Ollama model backends (defaults are sized to fit a 12 GB budget).
 
 ## Setup
 
@@ -416,6 +417,7 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `K2`  | `schema-status`            | Show schema status                     |
 | `K3`  | `db-backup`                | Back up DB files                       |
 | `K6`  | `db-manifest`              | Export a DB manifest                   |
+| `K7`  | `purge-test`               | Delete is_test-marked records          |
 | `W1`  | `task-start`               | Create a task record                   |
 | `W2`  | `task-update`              | Add a ledger/status update             |
 | `W3`  | `plan-create`              | Create a plan record                   |
@@ -448,6 +450,7 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `Q7`  | `quality-inspect`          | Inspect proof, eval, or quality record |
 | `Q8`  | `output-validate`          | Validate a payload against its schema  |
 | `Q9`  | `verify-query`             | Query verification conclusions         |
+| `Q10` | `contract-lint`            | Lint a contract for filler density     |
 | `M1`  | `migration-scan`           | Scan learning surfaces                 |
 | `M2`  | `migration-dry-run`        | Preview migration actions              |
 | `M3`  | `migration-apply`          | Apply migration actions                |
@@ -495,21 +498,31 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `O1`  | `lab-assemble`             | Assemble an improvement-lab case set   |
 | `O2`  | `lab-propose`              | Record an improvement proposal         |
 | `O3`  | `lab-report`               | Rank and report improvement proposals  |
+| `O4`  | `lab-evaluate`             | Evaluate proposals with the judge      |
+| `O5`  | `lab-dedup`                | Cluster near-duplicate records         |
 | `Y1`  | `comfy-run`                | Run + record a ComfyUI workflow        |
 | `Y2`  | `comfy-inspect`            | Inspect one generative run             |
 | `Y3`  | `comfy-list`               | List recent generative runs            |
 | `Y4`  | `comfy-replay`             | Re-submit a prior run's workflow       |
 | `Y5`  | `comfy-doctor`             | Probe the configured ComfyUI endpoint  |
+| `Y6`  | `comfy-runtime`            | Manage the local ComfyUI runtime       |
+| `Y7`  | `comfy-mcp`                | Probe or bake off local MCP servers    |
+| `Y8`  | `comfy-generate`           | Generate via the api or mcp route      |
+| `Y9`  | `comfy-ab-run`             | Run an api-vs-mcp A/B parity pair      |
 | `B1`  | `model-doctor`             | Probe configured model backends        |
 | `B2`  | `model-run`                | Advisory text via the LLM backend      |
 | `B3`  | `reembed`                  | Backfill evidence-chunk embeddings     |
+| `B4`  | `model-judge`              | Advisory LLM-as-judge score            |
+| `B5`  | `pii-scan`                 | Advisory PII scan (augments regex)     |
+| `B6`  | `model-monitor`            | Monitor live model backends            |
+| `B7`  | `embed-index`              | Manage per-model embedding indexes     |
 
 ### Operational Flags And File Safety
 
 A few cross-cutting flags harden the ops that touch files or the schema:
 
 - **Repo-only paths by default.** File-taking ops (`A1`, `A2`, `E1`) accept only paths inside the repository, so records stay portable and free of machine-specific absolute paths. To ingest or hash a file outside the repo, pass `--allow-external`; the record then stores a sanitized origin (`external:<filename>` plus the content hash), never the absolute path.
-- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records (SCHEMA v1 ships no foreign-key constraints, so this is the integrity check).
+- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records (the schema ships no foreign-key constraints, so this is the integrity check).
 - **`K1 --restamp-manifest`** reconciles the stored schema manifest hash after a benign additive engine update. Writes fail closed on manifest drift (a DDL change with no migration bump); this is the sanctioned way to clear that once you have confirmed the drift is expected.
 - **PDF ingestion is guarded**: size, page-count, encrypted, and no-extractable-text (scanned) PDFs are denied with a structured message rather than hanging or spiking memory.
 
@@ -601,12 +614,14 @@ The Kaizen DB includes compatible event storage so gateway integration can be ad
 
 The core harness is dependency-light and complete on its own — everything above works with nothing but Python and the pinned requirements. Three optional backends extend it, and each one stays entirely off until you install or point at it:
 
-- **Ollama** (`B*` / `model-*`) — connects any local or remote OpenAI-compatible model server. Embeddings light up `E3` chunk embeddings and `E4 --semantic` Turso-native vector search, and `model-run` adds advisory text. Enable with `KAIZEN_EMBED_MODEL` / `KAIZEN_LLM_MODEL`; setup in [`setup/OLLAMA.md`](setup/OLLAMA.md).
+- **Ollama** (`B*` / `model-*`) — connects any local or remote OpenAI-compatible model server. Embeddings light up `E3` chunk embeddings and `E4 --semantic` Turso-native vector search, `model-run` adds advisory text, and the advisory LLM-as-judge (`B4` / `O4`) scores work against a rubric (a signal, never a gate). Enable with `KAIZEN_EMBED_MODEL` / `KAIZEN_LLM_MODEL`; setup in [`setup/OLLAMA.md`](setup/OLLAMA.md).
 - **ComfyUI** (`Y*` / `comfy-*`) — turns generative image and node-graph workflows into managed records. The agent authors the workflow JSON; every run is stored with its graph hash, seed, artifacts, and traces, and can be replayed exactly. Setup in [`setup/COMFYUI.md`](setup/COMFYUI.md).
-- **PyTorch / sentence-transformers** (`KAIZEN_EMBED_BACKEND=sentence-transformers`) — in-process embeddings with no server to run, plus an embedder-backed `semantic` chunker for `E3`. Install [`requirements-pytorch.txt`](requirements-pytorch.txt); setup in [`setup/PYTORCH.md`](setup/PYTORCH.md). For local advisory text generation, use Ollama.
+- **PyTorch** ([`requirements-pytorch.txt`](requirements-pytorch.txt)) — in-process, GPU-first extras, all opt-in and advisory: `sentence-transformers` embeddings + the `semantic` chunker (`KAIZEN_EMBED_BACKEND=sentence-transformers`; the default `F2LLM-v2-1.7B` is instruction-tuned and was chosen on a measured retrieval A-B — see [`docs/EMBEDDING-BENCHMARK.md`](docs/EMBEDDING-BENCHMARK.md)); a cross-encoder reranker for `E4 --rerank` / `--hybrid` (`KAIZEN_RERANK_BACKEND`); a local `transformers` text backend so `B2` / `B4` run without a server (`KAIZEN_TEXT_BACKEND=transformers`); and a GLiNER2 PII scanner (`B5`, `KAIZEN_PII_MODEL`) that augments — never replaces — the regex redaction gate. Sized to fit a 12 GB GPU; setup in [`setup/PYTORCH.md`](setup/PYTORCH.md). Because the best embedder changes over time, indexes are per-model: `B7 embed-index` makes an upgrade a rolling, reversible re-index (build the new index while the old one serves, flip the active model, roll back if needed).
 - **Document ingestion** (`.pdf` / `.docx` / `.xlsx` in `E1`) — the native readers cover `.txt` / `.md` / `.html` / `.csv` with no install; the richer formats activate when you install [`requirements-docs.txt`](requirements-docs.txt) (pypdf, python-docx, openpyxl). Keep pypdf recent for its malformed-PDF fixes.
 
-Two rules hold no matter what you enable: skip all three and the deterministic chunker plus lexical search still cover the base case, and model output is advisory only — it never becomes the acceptance authority unless a deterministic verifier backs the call.
+Neural chunking is intentionally not included. The peer-reviewed evidence (Qu, Tu & Bao, _Is Semantic Chunking Worth the Computational Cost?_, Findings of NAACL 2025; arXiv 2410.13070) finds semantic and clustering chunking are not consistently worth their cost over fixed-size chunking on real corpora, so `recursive` (fixed-size) stays the supported default and the `neural` chunker value is reserved but unimplemented.
+
+Two rules hold no matter what you enable: skip every backend and the deterministic chunker plus lexical search still cover the base case, and model output is advisory only — it never becomes the acceptance authority unless a deterministic verifier backs the call.
 
 ## FAQ
 
@@ -620,7 +635,7 @@ Two rules hold no matter what you enable: skip all three and the deterministic c
 
 **Where does my data live?** In `AI/db/` inside the repo — local, private by default, and under your control. Nothing is uploaded anywhere.
 
-**Is it Windows-only?** No. The project is developed on Windows 11 Pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Ubuntu.
+**Is it Windows-only?** No. The project is developed on Windows 11 Pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Linux.
 
 ## Public Repository Safety
 

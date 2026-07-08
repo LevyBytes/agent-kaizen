@@ -32,12 +32,22 @@ class _ComfyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/system_stats"):
             self._json({"system": {"comfyui_version": "mock-1.0", "python_version": "3.x.mock"}})
+        elif self.path.startswith("/object_info"):
+            self._json({
+                "KSampler": {"input": {"required": {"seed": ["INT"], "steps": ["INT"]}}},
+                "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["mock.safetensors", "demo_v1.safetensors"]]}}},
+            })
         elif self.path.startswith("/history/"):
             prompt_id = self.path.rsplit("/", 1)[1]
+            # Multiple output keys (image + video + audio) exercise the key-agnostic fetch.
             self._json({
                 prompt_id: {
                     "status": {"status_str": "success", "completed": True},
-                    "outputs": {"9": {"images": [{"filename": "out.png", "subfolder": "", "type": "output"}]}},
+                    "outputs": {"9": {
+                        "images": [{"filename": "out.png", "subfolder": "", "type": "output"}],
+                        "gifs": [{"filename": "out.mp4", "subfolder": "", "type": "output"}],
+                        "audio": [{"filename": "out.flac", "subfolder": "", "type": "output"}],
+                    }},
                 }
             })
         elif self.path.startswith("/view"):
@@ -105,6 +115,60 @@ class ComfyLiveTest(IsolatedDBTest):
         self.assertEqual(rc2, 0, p2)
         self.assertEqual(p2.get("replay_of"), p["id"], p2)
         self.assertEqual(p2.get("run_status"), "completed", p2)
+
+    def test_multitype_outputs_all_saved(self):
+        wf = self._workflow()
+        rc, p = self.kz("Y1", "--path", str(wf), "--template", "multi", "--endpoint", self.url,
+                        "--summary", "Multi output.", "--timeout", "10")
+        self.assertEqual(rc, 0, p)
+        base = self.root / "AI" / "generation" / "multi"
+        for name in ("out.png", "out.mp4", "out.flac"):
+            self.assertTrue((base / name).is_file(), f"expected {name} saved")
+        self.assertEqual(len(p.get("output_artifact_ids", [])), 3, p)
+
+    def test_validate_passes_for_present_ckpt(self):
+        wf = self._workflow()  # ckpt mock.safetensors is in the mock /object_info choices
+        rc, p = self.kz("Y1", "--path", str(wf), "--template", "valok", "--endpoint", self.url,
+                        "--validate", "--summary", "Validated run.", "--timeout", "10")
+        self.assertEqual(rc, 0, p)
+        self.assertEqual(p.get("run_status"), "completed", p)
+
+    def test_validate_denies_missing_asset(self):
+        path = self.root / "bad_ckpt.json"
+        path.write_text(json.dumps({
+            "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "missing.safetensors"}},
+        }), encoding="utf-8")
+        rc, p = self.kz("Y1", "--path", str(path), "--endpoint", self.url, "--validate",
+                        "--summary", "Missing asset.", "--timeout", "10")
+        self.assertEqual(rc, 2, p)
+        self.assertEqual(p.get("code"), "DENIED_ASSET_MISSING", p)
+
+    def test_validate_denies_unknown_node(self):
+        path = self.root / "bad_node.json"
+        path.write_text(json.dumps({
+            "1": {"class_type": "NoSuchNode", "inputs": {}},
+        }), encoding="utf-8")
+        rc, p = self.kz("Y1", "--path", str(path), "--endpoint", self.url, "--validate",
+                        "--summary", "Unknown node.", "--timeout", "10")
+        self.assertEqual(rc, 2, p)
+        self.assertEqual(p.get("code"), "DENIED_WORKFLOW_NODES_UNKNOWN", p)
+
+    def test_y8_api_run_against_mock(self):
+        wf = self._workflow()
+        rc, p = self.kz("Y8", "--workflow-file", str(wf), "--template", "y8live", "--route", "api",
+                        "--endpoint", self.url, "--summary", "Y8 run.", "--timeout", "10")
+        self.assertEqual(rc, 0, p)
+        self.assertEqual(p.get("run_status"), "completed", p)
+        self.assertEqual(p.get("route"), "api", p)
+
+    def test_y9_denies_when_mcp_unpinned(self):
+        wf = self._workflow()  # seed 777 present, so the seed gate passes and the pin gate fires
+        rc, p = self.kz("Y9", "--workflow-file", str(wf), "--endpoint", self.url, "--summary", "Y9.", "--timeout", "10")
+        self.assertEqual(rc, 2, p)
+        self.assertEqual(p.get("code"), "DENIED_MCP_NOT_PINNED", p)
+        rc2, lst = self.kz("Y3")
+        self.assertEqual(rc2, 0, lst)
+        self.assertEqual(lst.get("records"), [], "api lane must not half-record when the MCP pin is missing")
 
 
 if __name__ == "__main__":

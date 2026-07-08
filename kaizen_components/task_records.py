@@ -70,6 +70,7 @@ def add_lifecycle_record(kind: str, args: Any, *, extra: dict[str, Any] | None =
     record_id = new_id(prefix)
     revision_id = new_id(f"{prefix}r")
     created = now()
+    is_test = 1 if getattr(args, "test", False) else 0  # removable live-test row (K7 purge-test)
     payload = {**fields, "id": record_id, "extra": extra or {}}
     content_hash = utc_text_hash(payload)
     extra = extra or {}
@@ -108,8 +109,8 @@ def add_lifecycle_record(kind: str, args: Any, *, extra: dict[str, Any] | None =
         if table == "learned":
             columns.append("source_learning_id")
             values.append(extra.get("source_learning_id"))
-        columns.extend(["content_hash", "current_revision_id"])
-        values.extend([content_hash, revision_id])
+        columns.extend(["content_hash", "current_revision_id", "is_test"])
+        values.extend([content_hash, revision_id, is_test])
         conn.execute(
             f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in values)})",
             tuple(values),
@@ -242,11 +243,13 @@ def add_ledger_event(args: Any, *, title: str | None = None, body: str | None = 
     created = now()
     content_hash = utc_text_hash({"id": record_id, **fields})
 
+    is_test = 1 if getattr(args, "test", False) else 0
+
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO ledger_events "
-            "(id, created_at, task_id, scope, status, title, summary, body, source_command, writer_role, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, created_at, task_id, scope, status, title, summary, body, source_command, writer_role, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -259,6 +262,7 @@ def add_ledger_event(args: Any, *, title: str | None = None, body: str | None = 
                 fields["source_command"],
                 fields["writer_role"],
                 content_hash,
+                is_test,
             ),
         )
 

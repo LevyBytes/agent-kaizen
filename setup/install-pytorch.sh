@@ -2,7 +2,7 @@
 # Install the OPT-IN PyTorch extra (sentence-transformers embeddings).
 set -euo pipefail
 
-GPU=0
+CPU=0
 CUDA_INDEX="https://download.pytorch.org/whl/cu121"
 DEVROOT_ARG=""
 PYTHON_EXE=""
@@ -11,7 +11,7 @@ EMIT_PLAN_JSON=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --gpu) GPU=1 ;;
+    --cpu) CPU=1 ;;
     --cuda-index) CUDA_INDEX="${2:-}"; shift ;;
     --devroot) DEVROOT_ARG="${2:-}"; shift ;;
     --python-exe) PYTHON_EXE="${2:-}"; shift ;;
@@ -63,10 +63,10 @@ step_preflight() {
 }
 
 step_torch() {
-  if [ "$GPU" -eq 1 ]; then
-    ak_run --note "Installing CUDA torch from $CUDA_INDEX." -- "$PYTHON" -m pip install torch --index-url "$CUDA_INDEX"
+  if [ "$CPU" -eq 1 ]; then
+    ak_run --note "Installing CPU torch (opt-out via --cpu); pip output is logged and tailed while this runs." -- "$PYTHON" -m pip install torch
   else
-    ak_run --note "Installing CPU torch; pip output is logged and tailed while this runs." -- "$PYTHON" -m pip install torch
+    ak_run --note "Installing CUDA torch (GPU-first default) from $CUDA_INDEX." -- "$PYTHON" -m pip install torch --index-url "$CUDA_INDEX"
   fi
 }
 
@@ -78,7 +78,7 @@ step_summary() {
   printf '\nPyTorch embedding backend installed. Current-shell settings:\n'
   printf '  export HF_HOME="%s"\n' "$CACHE"
   printf '  export KAIZEN_EMBED_BACKEND=sentence-transformers\n'
-  printf '  export KAIZEN_EMBED_MODEL=all-MiniLM-L6-v2\n'
+  printf '  export KAIZEN_EMBED_MODEL=codefuse-ai/F2LLM-v2-1.7B\n'
   printf '  Verify: "%s" "%s/kaizen.py" B1 --json\n' "$PYTHON" "$REPO_ROOT"
 }
 

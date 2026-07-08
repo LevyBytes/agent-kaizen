@@ -116,8 +116,8 @@ def make_report(args: Any) -> dict[str, Any]:
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
-            "INSERT INTO reports (id, created_at, report_type, scope, path, summary, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reports (id, created_at, report_type, scope, path, summary, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 report_id,
                 now(),
@@ -126,6 +126,7 @@ def make_report(args: Any) -> dict[str, Any]:
                 repo_relative(path),
                 f"{report_type.title()} report with {len(rows)} rows.",
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 

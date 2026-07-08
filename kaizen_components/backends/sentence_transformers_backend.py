@@ -12,11 +12,16 @@ embedder via the shared ``EmbeddingBackend`` protocol.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from ..denials import KaizenDenied
 
-_DEFAULT_MODEL = "all-MiniLM-L6-v2"  # 384-dim, small/fast; fixes the corpus embedding dimension
+# apache-2.0, 2026-03, Qwen3-1.7B backbone, 2048-dim, ~80 langs, instruction-tuned. Chosen over
+# granite-embedding-311m on a Kaizen-pipeline NDCG@10 A-B (see docs/EMBEDDING-BENCHMARK.md): +4.7 mean
+# / +12.7 on FiQA with its query instruction. Runner-up (lighter, 768-dim, wins scientific-claim
+# retrieval): ibm-granite/granite-embedding-311m-multilingual-r2.
+_DEFAULT_MODEL = "codefuse-ai/F2LLM-v2-1.7B"
 
 
 class SentenceTransformersBackend:
@@ -29,8 +34,11 @@ class SentenceTransformersBackend:
     def _load(self) -> Any:
         if self._encoder is not None:
             return self._encoder
+        from ..quiet import quiet_stderr
+
         try:
-            from sentence_transformers import SentenceTransformer
+            with quiet_stderr("sentence_transformers", "transformers"):
+                from sentence_transformers import SentenceTransformer
         except Exception as error:  # noqa: BLE001 -- extra not installed
             raise KaizenDenied(
                 "DENIED_BACKEND_UNAVAILABLE",
@@ -42,7 +50,8 @@ class SentenceTransformersBackend:
                 exit_code=2,
             ) from error
         try:
-            self._encoder = SentenceTransformer(self.model)
+            with quiet_stderr("sentence_transformers", "transformers"):
+                self._encoder = SentenceTransformer(self.model)
         except Exception as error:  # noqa: BLE001 -- bad model name / download failure
             raise KaizenDenied(
                 "DENIED_BACKEND_MODEL",
@@ -56,11 +65,22 @@ class SentenceTransformersBackend:
             ) from error
         return self._encoder
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         if not texts:
             return []
         encoder = self._load()
-        vectors = encoder.encode(list(texts), convert_to_numpy=True, normalize_embeddings=False)
+        kw: dict[str, Any] = {}
+        if is_query:
+            # Instruction-tuned embedders (F2LLM, Qwen3-Embedding, ...) need a query prompt to reach
+            # their retrieval ceiling; documents get none. Prefer an explicit env override, else the
+            # model's own configured "query" prompt (config_sentence_transformers.json). A model with
+            # no query prompt (e.g. granite) falls through to plain encoding -- behavior unchanged.
+            override = os.environ.get("KAIZEN_EMBED_QUERY_PROMPT")
+            if override:
+                kw["prompt"] = override
+            elif (getattr(encoder, "prompts", None) or {}).get("query"):
+                kw["prompt_name"] = "query"
+        vectors = encoder.encode(list(texts), convert_to_numpy=True, normalize_embeddings=False, **kw)
         return [[float(value) for value in row] for row in vectors]
 
     def probe(self) -> dict[str, Any]:

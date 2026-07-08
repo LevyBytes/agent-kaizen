@@ -51,6 +51,7 @@ ALIASES = {
     "K2": ["K2", "schema-status"],
     "K3": ["K3", "db-backup"],
     "K6": ["K6", "db-manifest"],
+    "K7": ["K7", "purge-test"],
     "W1": ["W1", "task-start"],
     "W2": ["W2", "task-update"],
     "W3": ["W3", "plan-create"],
@@ -83,6 +84,7 @@ ALIASES = {
     "Q7": ["Q7", "quality-inspect"],
     "Q8": ["Q8", "output-validate"],
     "Q9": ["Q9", "verify-query"],
+    "Q10": ["Q10", "contract-lint"],
     "M1": ["M1", "migration-scan"],
     "M2": ["M2", "migration-dry-run"],
     "M3": ["M3", "migration-apply"],
@@ -130,14 +132,24 @@ ALIASES = {
     "O1": ["O1", "lab-assemble"],
     "O2": ["O2", "lab-propose"],
     "O3": ["O3", "lab-report"],
+    "O4": ["O4", "lab-evaluate"],
+    "O5": ["O5", "lab-dedup"],
     "Y1": ["Y1", "comfy-run"],
     "Y2": ["Y2", "comfy-inspect"],
     "Y3": ["Y3", "comfy-list"],
     "Y4": ["Y4", "comfy-replay"],
     "Y5": ["Y5", "comfy-doctor"],
+    "Y6": ["Y6", "comfy-runtime"],
+    "Y7": ["Y7", "comfy-mcp"],
+    "Y8": ["Y8", "comfy-generate"],
+    "Y9": ["Y9", "comfy-ab-run"],
     "B1": ["B1", "model-doctor"],
     "B2": ["B2", "model-run"],
     "B3": ["B3", "reembed"],
+    "B4": ["B4", "model-judge"],
+    "B5": ["B5", "pii-scan"],
+    "B6": ["B6", "model-monitor"],
+    "B7": ["B7", "embed-index"],
 }
 
 ALIAS_TO_CODE = {alias.lower(): code for code, aliases in ALIASES.items() for alias in aliases}
@@ -151,6 +163,7 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     "K2": ("Show schema status", ("version", "migration")),
     "K3": ("Back up DB files", ("backup",)),
     "K6": ("Export a DB manifest", ("counts", "tables")),
+    "K7": ("Delete is_test-marked records", ("purge", "test", "cleanup", "teardown")),
     "W1": ("Create a task record", ("begin", "new", "start", "work")),
     "W2": ("Add a ledger/status update", ("status", "progress", "decision", "done", "note")),
     "W3": ("Create a plan record", ("plan",)),
@@ -183,6 +196,7 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     "Q7": ("Inspect proof, eval, or quality record", ()),
     "Q8": ("Validate a payload against its schema", ("schema", "json")),
     "Q9": ("Query verification conclusions", ("blockers", "failed", "checks")),
+    "Q10": ("Lint a contract for filler density", ("terse", "filler", "density", "wordy", "signal", "restatement")),
     "M1": ("Scan learning surfaces", ()),
     "M2": ("Preview migration actions", ("dry-run",)),
     "M3": ("Apply migration actions", ()),
@@ -230,14 +244,24 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     "O1": ("Assemble an improvement-lab case set", ("lab", "trainset")),
     "O2": ("Record an improvement proposal", ("candidate", "variant")),
     "O3": ("Rank and report improvement proposals", ("leaderboard",)),
+    "O4": ("Evaluate proposals with the judge", ("judge", "evaluate", "score")),
+    "O5": ("Cluster near-duplicate records", ("dedup", "duplicate", "cluster")),
     "Y1": ("Run + record a ComfyUI workflow", ("image", "generate", "diffusion")),
     "Y2": ("Inspect one generative run", ()),
     "Y3": ("List recent generative runs", ()),
     "Y4": ("Re-submit a prior run's workflow", ("replay",)),
     "Y5": ("Probe the configured ComfyUI endpoint", ("doctor",)),
+    "Y6": ("Manage the local ComfyUI runtime", ("runtime", "start", "stop", "provision", "doctor")),
+    "Y7": ("Probe or bake off local MCP servers", ("mcp", "bakeoff", "server")),
+    "Y8": ("Generate via the api or mcp route", ("generate", "image", "route", "mcp")),
+    "Y9": ("Run an api-vs-mcp A/B parity pair", ("ab", "parity", "compare")),
     "B1": ("Probe configured model backends", ("doctor", "ollama")),
     "B2": ("Advisory text via the LLM backend", ("llm", "model")),
     "B3": ("Backfill evidence-chunk embeddings", ("reembed", "vectors")),
+    "B4": ("Advisory LLM-as-judge score", ("judge", "grade", "verdict", "eval")),
+    "B5": ("Advisory PII scan (augments regex)", ("pii", "redact", "secret", "ner")),
+    "B6": ("Monitor live model backends", ("monitor", "watch", "gpu", "vram", "running", "status")),
+    "B7": ("Manage per-model embedding indexes", ("index", "activate", "prune", "rollback", "embedding", "migrate")),
 }
 
 # Ready-to-adapt examples for the ops agents reach for most; everything else gets a generic form.
@@ -369,8 +393,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, help="max seconds to wait on a backend run")
     parser.add_argument("--template", help="generative-run output template / subdir name")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run", help="validate + record without calling the backend")
-    parser.add_argument("--prompt", help="advisory model prompt (B2 model-run)")
+    parser.add_argument("--prompt", help="prompt text (B2 model-run; Y8/Y9 replaces the {{PROMPT}} placeholder)")
+    parser.add_argument("--workflow-file", dest="path", help="ComfyUI prompt JSON path (Y1/Y8/Y9; alias of --path)")
+    parser.add_argument("--action", help="Y6/Y7 subaction (Y6: status|provision|start|stop|doctor; Y7: doctor|bakeoff|run)")
+    parser.add_argument("--route", choices=["api", "mcp"], help="Y8: generation route (default api)")
+    parser.add_argument("--candidate", help="Y7: MCP candidate slug")
+    parser.add_argument("--seed", type=int, help="Y8/Y9: override every seed/noise_seed input in the workflow")
+    parser.add_argument("--validate", action="store_true", help="Y1/Y8: validate the workflow against live /object_info before submit")
+    parser.add_argument("--test", action="store_true", help="mark the written record is_test=1 (removable via K7 purge-test)")
+    parser.add_argument("--watch", action="store_true", help="B6: live-refresh the monitor until interrupted (TTY only)")
+    parser.add_argument("--interval", type=float, help="B6: --watch refresh seconds (default 2.0, min 0.5)")
+    parser.add_argument("--probe", action="store_true", help="B6: also load + probe each backend for its real device (loads weights)")
+    parser.add_argument("--hold", type=int, default=0, metavar="SEC", help="B6 --probe: keep the loaded backends resident for SEC seconds (sustained, observable load)")
+    parser.add_argument("--model", help="B3/B7: target embedding model id (default: the active model, else the configured backend's)")
+    parser.add_argument("--activate", action="store_true", help="B3/B7: make --model the active retrieval index (requires it to fully index the corpus)")
+    parser.add_argument("--list", action="store_true", dest="list", help="B7: list per-model embedding indexes (the default action)")
+    parser.add_argument("--prune", action="store_true", help="B7: delete a model's embedding index (never the active one)")
+    parser.add_argument("--previous", action="store_true", help="B7 --prune: drop the previous (most-recent non-active) model index")
+    parser.add_argument("--all-but-active", action="store_true", dest="all_but_active", help="B7 --prune: drop every non-active model index")
+    parser.add_argument("--keep-all", action="store_true", dest="keep_all", help="B3/B7 --activate: skip retention pruning (keep every model index)")
     parser.add_argument("--semantic", action="store_true", help="E4: vector search via the configured embedding backend")
+    parser.add_argument("--hybrid", action="store_true", help="E4: fuse lexical + vector results with Reciprocal Rank Fusion")
+    parser.add_argument("--rerank", action="store_true", help="E4: re-score top candidates with the configured cross-encoder reranker")
     parser.add_argument("--proof-id", help="proof or verification id")
     parser.add_argument("--eval-case-id", help="eval case id")
     parser.add_argument("--review-id", help="IRL review id")
@@ -386,6 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority", help="policy priority label")
     parser.add_argument("--query", help="query text")
     parser.add_argument("--limit", type=int, help="maximum records")
+    parser.add_argument("--threshold", type=float, help="O5: cosine similarity threshold for near-duplicate clustering")
     parser.add_argument("--path", help="file or fixture path")
     parser.add_argument(
         "--allow-external",
@@ -465,6 +510,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "OK", **db.backup_db()}
     if operation == "K6":
         return {"status": "OK", **db.export_manifest()}
+    if operation == "K7":
+        return db.purge_test_records()
 
     lifecycle_dispatch = {
         "W1": lambda: add_lifecycle_record("tasks", args),
@@ -538,6 +585,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     if operation == "Q8":
         return output_validate(args)
 
+    if operation == "Q10":
+        from .contract_lint import contract_lint
+
+        return contract_lint(args)
+
     if operation in {"T1", "T2", "T3", "T4"}:
         from .trace_records import add_eval_score, add_trace_event, query_eval_scores, trace_report
 
@@ -560,17 +612,32 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return query_evidence(args)
         return inspect_evidence(args)
 
-    if operation in {"O1", "O2", "O3"}:
-        from .lab import add_proposal, assemble_case_set, proposal_report
+    if operation in {"O1", "O2", "O3", "O4"}:
+        from .lab import add_proposal, assemble_case_set, lab_evaluate, proposal_report
 
         if operation == "O1":
             return assemble_case_set(args)
         if operation == "O2":
             return add_proposal(args)
-        return proposal_report(args)
+        if operation == "O3":
+            return proposal_report(args)
+        return lab_evaluate(args)
 
-    if operation in {"Y1", "Y2", "Y3", "Y4", "Y5"}:
-        from .comfyui import comfy_doctor, comfy_inspect, comfy_list, comfy_replay, run_workflow
+    if operation == "O5":
+        from .dedup import cluster_records
+
+        return cluster_records(args)
+
+    if operation in {"Y1", "Y2", "Y3", "Y4", "Y5", "Y8", "Y9"}:
+        from .comfyui import (
+            comfy_ab_run,
+            comfy_doctor,
+            comfy_generate,
+            comfy_inspect,
+            comfy_list,
+            comfy_replay,
+            run_workflow,
+        )
 
         if operation == "Y1":
             return run_workflow(args)
@@ -580,16 +647,47 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return comfy_list(args)
         if operation == "Y4":
             return comfy_replay(args)
+        if operation == "Y8":
+            return comfy_generate(args)
+        if operation == "Y9":
+            return comfy_ab_run(args)
         return comfy_doctor(args)
 
-    if operation in {"B1", "B2", "B3"}:
-        from .model_ops import model_doctor, model_run, reembed
+    if operation == "Y6":
+        from .comfy_runtime import comfy_runtime
+
+        return comfy_runtime(args)
+
+    if operation == "Y7":
+        from .comfy_mcp import comfy_mcp
+
+        return comfy_mcp(args)
+
+    if operation in {"B1", "B2", "B3", "B4"}:
+        from .model_ops import model_doctor, model_judge, model_run, reembed
 
         if operation == "B1":
             return model_doctor(args)
         if operation == "B2":
             return model_run(args)
-        return reembed(args)
+        if operation == "B3":
+            return reembed(args)
+        return model_judge(args)
+
+    if operation == "B5":
+        from .pii_scan import pii_scan
+
+        return pii_scan(args)
+
+    if operation == "B6":
+        from .model_monitor import model_monitor
+
+        return model_monitor(args)
+
+    if operation == "B7":
+        from .model_index import embed_index
+
+        return embed_index(args)
 
     migration_dispatch = {
         "M1": migration_learning.scan_roots,
@@ -647,8 +745,8 @@ def add_packet(args: argparse.Namespace, *, table: str, packet_type: str) -> dic
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             f"INSERT INTO {table} "
-            "(id, created_at, task_id, packet_type, status, title, summary, body, payload_json, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, created_at, task_id, packet_type, status, title, summary, body, payload_json, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -660,6 +758,7 @@ def add_packet(args: argparse.Namespace, *, table: str, packet_type: str) -> dic
                 body,
                 payload_json,
                 content_hash,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -729,7 +828,7 @@ def source_add(args: argparse.Namespace) -> dict[str, Any]:
         conn.execute(
             "INSERT INTO source_locks "
             "(id, created_at, source_id, authority_tier, url_or_repository, version_or_commit, retrieved_at, "
-            "content_hash, license, supersedes, summary, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "content_hash, license, supersedes, summary, body, is_test) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -743,6 +842,7 @@ def source_add(args: argparse.Namespace) -> dict[str, Any]:
                 args.supersedes,
                 args.summary,
                 body,
+                1 if getattr(args, "test", False) else 0,
             ),
         )
 
@@ -822,9 +922,10 @@ def irl_dispatch(operation: str, args: argparse.Namespace) -> dict[str, Any]:
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
-            "INSERT INTO irl_reviews (id, created_at, review_id, event_type, status, decision, summary, body, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (record_id, created, review_id, event_type, args.status or "recorded", decision, summary, body, content_hash),
+            "INSERT INTO irl_reviews (id, created_at, review_id, event_type, status, decision, summary, body, content_hash, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (record_id, created, review_id, event_type, args.status or "recorded", decision, summary, body, content_hash,
+             1 if getattr(args, "test", False) else 0),
         )
 
     db.write_tx(op)

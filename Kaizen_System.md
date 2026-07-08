@@ -268,6 +268,12 @@ Quality review should cover more than behavior correctness:
 
 High-recall review mode is useful for substantial work. Missing an important structural issue is worse than raising some false positives. Findings should be labeled by evidence, severity, scope, and actionability.
 
+Agent contracts have a density standard: plans, task specs, subagent and handoff instructions, durable records, and generated reports must be terse, technical, and signal-dense — no colloquialisms, filler, or restatement, maximizing signal per token. Human-authored documentation and commit messages keep a human voice and are out of scope. The standard is deterministically checkable (a filler and hedge wordlist, qualifier density, and near-duplicate-sentence detection), so its verdict can gate; see the contract-bloat anti-pattern in the next section.
+
+Model freshness is a standard. Default model repos — text generation, reranker, PII, and embedder — must be current best-in-class and reviewed on a cadence, never a stale default. Using an outdated or under-performant model when a better one exists contradicts the continual improvement ethos. This standard is invoked when the framework is updated or on user inquiry, not on every agent turn. Model VRAM budget should remain adaptive to each system according to user preferences, but for public facing initial adoption the defaults models are sized to a 12 GB VRAM budget.
+
+Research on utilization or retirement of model implementation methods for this framework should be done against a fixed source allowlist of peer reviewed research papers available from platforms such as: arXiv, OpenReview, JMLR, Nature Machine Intelligence, JAIR, HuggingFace, GitHub, official Anthropic and OpenAI reports, and ACL Anthology; and all model implementation methods for the framework should be validated against available workflows and available datasets before trusted for wide adoption.
+
 ## 9. Agent Code Anti-Patterns
 
 The anti-pattern catalog tracks recurring failure shapes that coding agents tend to introduce.
@@ -284,6 +290,8 @@ Each anti-pattern should include:
 Keep entries operational. A reviewer should know what evidence triggers the finding and what correction to prefer.
 
 For example, agent workspace discipline. A spawned subagent with shell and network access clones repositories into the OS temp directory or the user profile on the system drive instead of the project work area. The harm is a polluted system drive, untracked bulk, and a crawler running from a shared temp dir. The correction is to pin all scratch to the project work area, forbid cloning and network writes in spawned-agent prompts, and prefer a single parent-side fetch that read-only agents point at. The harness redirects its own temp into the work area, but agents launched outside the harness do not inherit that, which is exactly how the footgun fires.
+
+For example, contract bloat. An agent-authored plan or record accumulates colloquialisms, hedges, and restated sentences. The harm is wasted context and degraded downstream-agent performance, since every filler token displaces signal. The correction is to write terse, technical, signal-dense contracts and cut restatement. The trigger evidence is a filler or hedge phrase, high qualifier density, or a near-duplicate sentence, which a deterministic lint flags. The valid exception is human-authored prose and commit messages, which keep a human voice.
 
 ## 10. Local Harness Example
 

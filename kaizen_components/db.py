@@ -12,12 +12,15 @@ from typing import Any, Callable
 from . import TOOL_VERSION
 from .db_retry import ATTEMPTS, is_retryable, retry_delay, with_retry
 from .db_schema import (
+    ADDITIVE_COLUMNS,
     DDL,
     FTS_INDEX_SQL,
     INDEXES,
     MIGRATION_ID,
     REFERENCES,
     SCHEMA_VERSION,
+    TEST_COUNT_SQL,
+    TEST_PURGE_SQL,
     schema_manifest,
 )
 from .denials import KaizenDenied
@@ -69,13 +72,105 @@ def connect():
     ) from last_error
 
 
+def _apply_additive_columns(conn) -> None:
+    """Add benign additive columns (is_test) to every root record table. Idempotent: skips a column
+    already present via PRAGMA table_info. This is the sole source of is_test for most tables (it is
+    NOT in their CREATE DDL, so ddl_sha256 / the manifest is unchanged); a fresh DB gets the column from
+    this ALTER right after the CREATE, an existing DB from this ALTER on the next K1."""
+    for table, column, coldef in ADDITIVE_COLUMNS:
+        try:
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        except Exception:  # noqa: BLE001 -- table missing/unreadable -> the CREATE DDL handles it
+            continue
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+
+
+def purge_test_records() -> dict[str, Any]:
+    """K7: delete every is_test=1 record (roots + their descendants) from the real DB. Safe and
+    deterministic -- only rows explicitly flagged is_test=1 and their children are removed, in one
+    transaction. Counts are captured before the deletes so the report shows what was purged."""
+    ensure_schema()
+
+    def op(conn, _attempt):
+        counts = {table: conn.execute(sql).fetchone()[0] for table, sql in TEST_COUNT_SQL.items()}
+        for stmt in TEST_PURGE_SQL:
+            conn.execute(stmt)
+        return counts
+
+    counts = with_retry(connect, op)
+    return {"status": "OK", "message": "Purged is_test records.", "purged": counts, "total": sum(counts.values())}
+
+
+def _stored_schema_version(conn) -> int | None:
+    """The schema_version integer stamped in the DB, or None on a brand-new DB (table/row absent)."""
+    try:
+        row = conn.execute("SELECT schema_version FROM schema_version WHERE id = 'current'").fetchone()
+    except Exception:  # noqa: BLE001 -- table not created yet on a fresh DB
+        return None
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _seed_active_model_if_absent(conn) -> None:
+    """Record the active embedding model = the dominant model already in chunk_embeddings, when the
+    setting is unset. No-op on a fresh/empty DB (E4 then falls back to the configured backend model)."""
+    existing = conn.execute("SELECT value FROM db_settings WHERE key = 'active_embedding_model'").fetchone()
+    if existing and existing[0]:
+        return
+    dominant = conn.execute(
+        "SELECT embedding_model FROM chunk_embeddings GROUP BY embedding_model "
+        "ORDER BY COUNT(*) DESC, embedding_model LIMIT 1"
+    ).fetchone()
+    if dominant and dominant[0]:
+        conn.execute(
+            "INSERT OR REPLACE INTO db_settings (key, value, updated_at) VALUES ('active_embedding_model', ?, ?)",
+            (dominant[0], now()),
+        )
+
+
+def _migrate(conn) -> None:
+    """Idempotent forward migrations, run inside K1 after the CREATE/ALTER/index pass.
+
+    v1 -> v2: move the inline evidence_chunks.embedding/embedding_model into the normalized
+    chunk_embeddings side table, seed active_embedding_model, then DROP the two inline columns. Runs
+    whenever those columns are still present (so a partial or hand-built pre-v2 DB converges); the
+    guards make a re-run a no-op. No data is at risk -- evidence_chunks.text is the source of truth and
+    the embedding index is rebuildable from it (B3)."""
+    inline_cols = {r[1] for r in conn.execute("PRAGMA table_info(evidence_chunks)").fetchall()}
+    if "embedding" in inline_cols and "embedding_model" in inline_cols:
+        # Backfill exact vector32 blobs (raw bytes, no float round-trip); dim from vector_extract length.
+        rows = conn.execute(
+            "SELECT ec.id, ec.embedding_model, ec.embedding, vector_extract(ec.embedding), ec.created_at, "
+            "COALESCE(ed.is_test, 0) FROM evidence_chunks ec "
+            "LEFT JOIN evidence_documents ed ON ec.document_id = ed.id "
+            "WHERE ec.embedding IS NOT NULL AND ec.embedding_model IS NOT NULL"
+        ).fetchall()
+        for cid, emodel, blob, extracted, created, is_test in rows:
+            try:
+                dim = len(json.loads(extracted)) if extracted else 0
+            except Exception:  # noqa: BLE001 -- a corrupt extract falls back to dim 0 (still queryable-by-model)
+                dim = 0
+            conn.execute(
+                "INSERT OR IGNORE INTO chunk_embeddings "
+                "(chunk_id, embedding_model, dim, embedding, created_at, is_test) VALUES (?, ?, ?, ?, ?, ?)",
+                (cid, emodel, dim, blob, created or now(), int(is_test or 0)),
+            )
+        _seed_active_model_if_absent(conn)
+        conn.execute("ALTER TABLE evidence_chunks DROP COLUMN embedding")
+        conn.execute("ALTER TABLE evidence_chunks DROP COLUMN embedding_model")
+    else:
+        _seed_active_model_if_absent(conn)
+
+
 def initialize() -> dict[str, Any]:
     ensure_runtime_dirs()
     conn = connect()
     applied_at = now()
     try:
+        prior_version = _stored_schema_version(conn)  # read BEFORE the DDL creates the table on a fresh DB
         for stmt in DDL:
             conn.execute(stmt)
+        _apply_additive_columns(conn)  # ALTER existing tables that CREATE IF NOT EXISTS cannot touch
         for stmt in INDEXES:
             conn.execute(stmt)
         # Opt-in experimental FTS index, created here (K1) rather than on the E4 query hot
@@ -85,6 +180,7 @@ def initialize() -> dict[str, Any]:
                 conn.execute(FTS_INDEX_SQL)
             except Exception:
                 pass
+        _migrate(conn)  # idempotent forward migrations (v1 -> v2 inline-embedding -> side table)
         # INSERT OR IGNORE instead of check-then-insert: two processes racing K1 would
         # otherwise both see no row and collide on the PRIMARY KEY (UNIQUE violations are
         # not in is_retryable(), so the loser would fail hard instead of retrying).
@@ -95,6 +191,15 @@ def initialize() -> dict[str, Any]:
             "VALUES (?, ?, ?, ?, ?, ?)",
             ("current", SCHEMA_VERSION, MIGRATION_ID, applied_at, TOOL_VERSION, manifest_hash),
         )
+        # Bring an older stamped row current AFTER a forward migration ran. Scoped to a real version
+        # bump so a plain K1 never silently repairs manifest drift -- that stays gated behind
+        # K1 --restamp-manifest (see restamp_manifest / the DENIED_SCHEMA_DRIFT write gate).
+        if prior_version is not None and prior_version < SCHEMA_VERSION:
+            conn.execute(
+                "UPDATE schema_version SET schema_version = ?, migration_id = ?, applied_at = ?, "
+                "tool_version = ?, manifest_hash = ? WHERE id = 'current'",
+                (SCHEMA_VERSION, MIGRATION_ID, applied_at, TOOL_VERSION, manifest_hash),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -145,6 +250,43 @@ def schema_status() -> dict[str, Any]:
         "manifest_match": row[4] == expected_manifest_hash,
         "schema_ok": int(row[0]) == SCHEMA_VERSION and row[1] == MIGRATION_ID,
     }
+
+
+def get_active_embedding_model(default: str | None = None) -> str | None:
+    """The active embedding model recorded in db_settings (E4/O5 rank against this model's index),
+    or ``default`` when unset. Stored fact, not an env guess: it survives across processes and
+    embedder-config changes, so retrieval always targets the index the operator activated."""
+    row = fetch_one("SELECT value FROM db_settings WHERE key = 'active_embedding_model'")
+    return row[0] if row and row[0] else default
+
+
+def set_active_embedding_model(model: str) -> None:
+    """Point retrieval at ``model``'s index (B3 --activate / B7 --activate). Upsert on the kv row."""
+    def op(conn: Any, _attempt: int) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO db_settings (key, value, updated_at) VALUES ('active_embedding_model', ?, ?)",
+            (model, now()),
+        )
+
+    write_tx(op)
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    """Read a durable key/value setting (db_settings), or ``default`` when unset. Generic
+    accessor for stored facts like the pinned MCP candidate (``active_comfy_mcp``)."""
+    row = fetch_one("SELECT value FROM db_settings WHERE key = ?", (key,))
+    return row[0] if row and row[0] else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """Upsert a durable key/value setting (db_settings)."""
+    def op(conn: Any, _attempt: int) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO db_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now()),
+        )
+
+    write_tx(op)
 
 
 def ensure_schema() -> None:
@@ -216,7 +358,7 @@ def restamp_manifest() -> dict[str, Any]:
 
 
 def integrity_scan() -> dict[str, Any]:
-    """Read-only cross-table reference scan (SCHEMA v1 ships no FK constraints).
+    """Read-only cross-table reference scan (the schema ships no FK constraints).
 
     For each child (table, column) -> parent (table, column) in REFERENCES, count non-NULL
     child values with no matching parent row. NULL child references are valid (optional).
@@ -227,10 +369,12 @@ def integrity_scan() -> dict[str, Any]:
         rows = read_retry(
             lambda conn, ct=child_table, cc=child_col, pt=parent_table, pc=parent_col: list(
                 conn.execute(
-                    f"SELECT ct.{cc}, ct.id FROM {ct} AS ct "
+                    # rowid, not a literal "id" column: child tables need not be id-keyed
+                    # (e.g. generative_run_routes is keyed by run_id), and every rowid table works.
+                    f"SELECT ct.{cc}, ct.rowid FROM {ct} AS ct "
                     f"LEFT JOIN {pt} AS pt ON ct.{cc} = pt.{pc} "
                     f"WHERE ct.{cc} IS NOT NULL AND pt.{pc} IS NULL "
-                    f"ORDER BY ct.id LIMIT 6"
+                    f"ORDER BY ct.rowid LIMIT 6"
                 ).fetchall()
             )
         )
@@ -252,7 +396,7 @@ def integrity_scan() -> dict[str, Any]:
         "relationships_checked": len(REFERENCES),
         # Only surface relationships that actually have orphans, to keep the payload compact.
         "orphaned_relationships": [r for r in relationships if r["orphans"]],
-        "note": "read-only reference scan; NULL references are valid. SCHEMA v1 has no FK constraints.",
+        "note": "read-only reference scan; NULL references are valid. The schema ships no FK constraints.",
     }
 
 

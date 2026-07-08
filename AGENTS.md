@@ -6,6 +6,8 @@
 
 Agent Kaizen is a local implementation of the Kaizen System for AI coding-agent work in VS Code projects.
 
+**Run everything through the shared Python venv, not a repo-local `.venv`.** The interpreter is `$DEVROOT/Python/venvs/kaizen/Scripts/python.exe` (Windows) or `$DEVROOT/Python/venvs/kaizen/bin/python` (Linux/macOS), built by `setup/SETUP.md` from `requirements-kaizen.txt`. Activate it (or call it by full path) before any `python kaizen.py ...` or `python -m unittest discover -s AI/tests` in this file; a repo-local `.venv` is only a fallback and usually absent.
+
 Use [`Kaizen_System.md`](Kaizen_System.md) for the full portable method:
 
 ```text
@@ -91,6 +93,7 @@ Use skills when the task matches the trigger.
 - Verify with ground truth before synthesis-only review.
 - Installer/tooling steps must be idempotent: pre-flight validate (detect already-present, valid results) and skip their download/install work on a warm re-run; do work only when validation fails, then re-validate. See `setup/SETUP.md`.
 - Markdown/docs use Prettier settings `proseWrap: never` / `printWidth: 100` (config kept local, not shipped) — one clean line per paragraph/bullet, never hard-wrapped at a column; optionally `npx prettier --check <files>` if prettier is installed — a convenience, not a required gate.
+- Agent contracts (plans, task specs, subagent instructions, durable DB records, generated reports) are terse, technical, and signal-dense: no colloquialisms, filler, or restatement; maximize signal per token. Human-authored docs and commit/PR text are out of scope. Lint with `Q10 contract-lint`.
 - Record meaningful proof, artifacts, decisions, and learning records through the harness.
 - Update `AI/work/build-ledger.md` after major milestones until DB ledger reporting fully replaces it.
 - Keep private policy details out of public tracked docs; load them through `X5`.

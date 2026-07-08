@@ -3,7 +3,7 @@
   Install the OPT-IN PyTorch extra (in-process sentence-transformers embeddings + semantic chunking).
 
   Usage:
-    setup\install-pytorch.ps1 [-Gpu] [-CudaIndex URL] [-DevRoot D:\dev] [-PythonExe path]
+    setup\install-pytorch.ps1 [-Cpu] [-CudaIndex URL] [-DevRoot D:\dev] [-PythonExe path]
     setup\install-pytorch.ps1 -ListSteps
     setup\install-pytorch.ps1 -PlanOnly -NoNetwork -NoExternalActions
 #>
@@ -11,7 +11,7 @@
 param(
     [string]$DevRoot,
     [string]$PythonExe,
-    [switch]$Gpu,
+    [switch]$Cpu,
     [string]$CudaIndex = 'https://download.pytorch.org/whl/cu121',
     [switch]$PlanOnly,
     [switch]$ListSteps,
@@ -56,10 +56,10 @@ Invoke-AkStep -Id 'preflight' -Name 'Resolve DEVROOT, Python, and model cache' -
 }
 
 Invoke-AkStep -Id 'torch' -Name 'Install or validate torch wheel' -ScriptBlock {
-    if ($Gpu) {
-        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','torch','--index-url',$CudaIndex) -ActivityNote ('Installing CUDA torch from {0}; pip will report package download progress when available.' -f $CudaIndex)
+    if ($Cpu) {
+        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','torch') -ActivityNote 'Installing CPU torch (opt-out via -Cpu); pip output is logged and tailed while this runs.'
     } else {
-        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','torch') -ActivityNote 'Installing CPU torch; pip output is logged and tailed while this runs.'
+        Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','pip','install','torch','--index-url',$CudaIndex) -ActivityNote ('Installing CUDA torch (GPU-first default) from {0}; pip will report package download progress when available.' -f $CudaIndex)
     }
 }
 
@@ -74,6 +74,6 @@ Invoke-AkStep -Id 'summary' -Name 'Print backend environment and verification co
     Write-Host 'PyTorch embedding backend installed. Current-session settings:' -ForegroundColor Green
     Write-Host ("  `$env:HF_HOME              = '{0}'" -f $script:AkCache)
     Write-Host "  `$env:KAIZEN_EMBED_BACKEND = 'sentence-transformers'"
-    Write-Host "  `$env:KAIZEN_EMBED_MODEL   = 'all-MiniLM-L6-v2'"
+    Write-Host "  `$env:KAIZEN_EMBED_MODEL   = 'codefuse-ai/F2LLM-v2-1.7B'"
     Write-Host ("  Verify: & '{0}' '{1}' B1 --json" -f $script:AkPython, (Join-Path $repoRoot 'kaizen.py'))
 }

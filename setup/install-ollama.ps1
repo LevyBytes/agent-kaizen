@@ -3,15 +3,15 @@
   Light setup for the Ollama model backend (B* / model-*).
 
   Usage:
-    setup\install-ollama.ps1 [-EmbedModel nomic-embed-text] [-ChatModel llama3.2] [-DevRoot D:\dev]
+    setup\install-ollama.ps1 [-EmbedModel <name>] [-ChatModel <name>] [-DevRoot D:\dev]
     setup\install-ollama.ps1 -ListSteps
     setup\install-ollama.ps1 -PlanOnly -NoExternalActions
 #>
 [CmdletBinding()]
 param(
     [string]$DevRoot,
-    [string]$EmbedModel = 'nomic-embed-text',
-    [string]$ChatModel = 'llama3.2',
+    [string]$EmbedModel = 'hf.co/mradermacher/KaLM-embedding-multilingual-mini-instruct-v2.5-GGUF:Q8_0',
+    [string]$ChatModel = 'hf.co/unsloth/Qwen3.5-9B-GGUF:Q4_K_M',
     [switch]$PlanOnly,
     [switch]$ListSteps,
     [string]$EmitPlanJson,

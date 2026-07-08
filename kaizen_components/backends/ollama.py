@@ -8,6 +8,7 @@ when the ``/v1`` route is unavailable.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Any
@@ -26,9 +27,13 @@ class OllamaEmbeddingBackend:
         self.api_key = api_key
         self.client = OpenAICompatClient(self.base_url, api_key=api_key)
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         if not texts:
             return []
+        # Ollama embedders have no prompt config; honor an explicit query-instruction override only.
+        prompt = os.environ.get("KAIZEN_EMBED_QUERY_PROMPT") if is_query else None
+        if prompt:
+            texts = [prompt + t for t in texts]
         try:
             vectors = self.client.embeddings(texts, self.model)
             if vectors:

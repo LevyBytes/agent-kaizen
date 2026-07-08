@@ -59,14 +59,15 @@ def add_policy(args: Any) -> dict[str, Any]:
     record_id = new_id("pol")
     revision_id = new_id("polr")
     created = now()
+    is_test = 1 if getattr(args, "test", False) else 0
     content_hash = utc_text_hash({"id": record_id, **fields})
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
             "INSERT INTO private_policy "
             "(id, created_at, updated_at, scope, trigger, priority, status, title, summary, body, "
-            "source_command, writer_role, content_hash, current_revision_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_command, writer_role, content_hash, current_revision_id, is_test) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 created,
@@ -82,6 +83,7 @@ def add_policy(args: Any) -> dict[str, Any]:
                 fields["writer_role"],
                 content_hash,
                 revision_id,
+                is_test,
             ),
         )
         conn.execute(

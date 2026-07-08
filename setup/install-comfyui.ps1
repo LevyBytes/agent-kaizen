@@ -3,14 +3,19 @@
   Guided install of ComfyUI as a DEVROOT sibling for Agent Kaizen's Y* backend.
 
   Usage:
-    setup\install-comfyui.ps1 [-Gpu] [-DevRoot D:\dev] [-PythonExe path]
+    setup\install-comfyui.ps1 [-Gpu] [-DevRoot D:\dev] [-PythonExe path] [-VenvPath path]
     setup\install-comfyui.ps1 -ListSteps
     setup\install-comfyui.ps1 -PlanOnly -NoNetwork -NoExternalActions
+
+  -VenvPath places the ComfyUI virtual environment at a custom location (default:
+  <DevRoot>\ComfyUI\.venv). If you move it, set KAIZEN_COMFYUI_VENV to the same path so the
+  Y6 comfy-runtime ops find it.
 #>
 [CmdletBinding()]
 param(
     [string]$DevRoot,
     [string]$PythonExe,
+    [string]$VenvPath,
     [switch]$Gpu,
     [string]$CudaIndex = 'https://download.pytorch.org/whl/cu121',
     [string]$Repo = 'https://github.com/comfyanonymous/ComfyUI.git',
@@ -50,7 +55,7 @@ if ($SelfTest) { Show-AkPlan }
 $script:AkPython = ''
 $script:AkGit = ''
 $script:AkTarget = Join-Path $resolvedDevRoot 'ComfyUI'
-$script:AkVenv = Join-Path $script:AkTarget '.venv'
+$script:AkVenv = if ([string]::IsNullOrWhiteSpace($VenvPath)) { Join-Path $script:AkTarget '.venv' } else { $VenvPath }
 $script:AkVenvPython = Join-Path $script:AkVenv 'Scripts\python.exe'
 
 Invoke-AkStep -Id 'preflight' -Name 'Resolve DEVROOT, Python, Git, and target paths' -ScriptBlock {
