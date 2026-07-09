@@ -204,6 +204,12 @@ def session_digest(args: Any) -> dict[str, Any]:
             fetch_one("SELECT COUNT(*) FROM verification_events WHERE created_at >= ?", (week_cutoff,))[0]
         ),
     }
+    # Orchestration ledger visibility (T5-T8): active runs, off-screen approvals, live children, and
+    # the child-leak canary. Lazy import keeps reports independent of the agent_runs module load order.
+    from .agent_runs import session_digest_sections
+
+    orchestration = session_digest_sections(limit)
+    counts.update(orchestration.pop("counts"))
     return {
         "status": "OK",
         "message": "Session digest loaded.",
@@ -225,6 +231,7 @@ def session_digest(args: Any) -> dict[str, Any]:
         "active_tasks": [
             {"id": r[0], "title": r[1], "status": r[2], "summary": r[3], "updated_at": r[4]} for r in tasks
         ],
+        **orchestration,
         "counts": counts,
         "required_action": (
             "apply the policy records now; treat blocking verifications and active GOTCHAs as open work; "

@@ -30,10 +30,17 @@ class ReportOpsTest(IsolatedDBTest):
                 "active_tasks_without_ledger": 0,
                 "ledger_events_last_7d": 0,
                 "verifications_last_7d": 0,
+                "agent_runs_active": 0,
+                "agent_runs_waiting_approval": 0,
+                "live_children": 0,
+                "parent_completed_with_live_children": 0,
             },
             p,
         )
-        for section in ("policies", "active_gotchas", "blocking_verifications", "recent_learned", "active_tasks"):
+        for section in (
+            "policies", "active_gotchas", "blocking_verifications", "recent_learned", "active_tasks",
+            "active_agent_runs", "waiting_approvals",
+        ):
             self.assertEqual(p.get(section), [], f"{section}: {p}")
         self.assertIn("R0 after compaction", p.get("required_action", ""), p)
         # Pure read: no report file path and no new record id in the payload.

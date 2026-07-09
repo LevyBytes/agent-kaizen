@@ -390,12 +390,22 @@ def integrity_scan() -> dict[str, Any]:
             if count > 5:
                 entry["sample_truncated"] = True
         relationships.append(entry)
+    # Child-leak invariant: a terminal-SUCCESS agent run that still has an open child. Not a
+    # REFERENCES orphan (which checks id existence); this is a structural consistency fault the
+    # Q2/W2 completion gate prevents live, but crash-path/out-of-order-replay/pre-gate data can
+    # still commit. Recomputed from agent_events. Lazy import avoids a db <-> agent_runs cycle.
+    from .agent_runs import find_child_leaks
+
+    child_leaks = find_child_leaks()
+    total_violations = int(child_leaks["violations"])
     return {
-        "ok": total_orphans == 0,
+        "ok": total_orphans == 0 and total_violations == 0,
         "total_orphans": total_orphans,
         "relationships_checked": len(REFERENCES),
         # Only surface relationships that actually have orphans, to keep the payload compact.
         "orphaned_relationships": [r for r in relationships if r["orphans"]],
+        "invariants": [child_leaks] if total_violations else [],
+        "total_invariant_violations": total_violations,
         "note": "read-only reference scan; NULL references are valid. The schema ships no FK constraints.",
     }
 

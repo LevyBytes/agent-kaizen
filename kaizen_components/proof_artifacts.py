@@ -13,6 +13,12 @@ from .task_records import _text_arg
 from .text_search import like_pattern
 
 
+# Q2 conclusions that assert success -- these are gated while a linked agent run has live children or
+# unresolved approvals (a parent cannot sign off while its orchestration is still in flight). The
+# failure/decision conclusions stay ALLOWED so the harness can record blocked truth precisely then.
+_GATED_SUCCESS_CONCLUSIONS = {"VERIFIED_ACCEPTABLE", "ACCEPTABLE_WITH_CONCERNS"}
+
+
 def add_artifact(args: Any) -> dict[str, Any]:
     raw_path = getattr(args, "path", None)
     if not raw_path:
@@ -186,8 +192,31 @@ def add_verification(args: Any) -> dict[str, Any]:
         },
     )
     content_hash = utc_text_hash(payload)
+    task_id = getattr(args, "task_id", None)
+    gate_success = payload["conclusion"] in _GATED_SUCCESS_CONCLUSIONS
 
     def op(conn: Any, _attempt: int) -> None:
+        # Completion gate, recomputed from agent_events on THIS write connection (no TOCTOU window):
+        # a success verification is denied while a linked, non-terminal agent run still has an open
+        # child or unresolved approval. Fail-open: no task_id / no linked run -> allowed.
+        if gate_success and task_id:
+            from .agent_runs import task_live_orchestration
+
+            block = task_live_orchestration(conn, task_id)
+            if block:
+                raise KaizenDenied(
+                    "DENIED_TASK_HAS_LIVE_CHILDREN",
+                    {
+                        "task_id": task_id,
+                        **block,
+                        "conclusion": payload["conclusion"],
+                        "required_action": (
+                            "finalize the linked agent run(s) (T8) before a success verification; "
+                            "NEEDS_HUMAN_DECISION / STRUCTURAL_REWORK_RECOMMENDED / VERIFICATION_FAILED are allowed"
+                        ),
+                    },
+                    exit_code=2,
+                )
         conn.execute(
             "INSERT INTO verification_events "
             "(id, created_at, task_id, proof_id, conclusion, evidence_locations_json, findings_json, remedies_json, "

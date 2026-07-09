@@ -53,6 +53,41 @@ KAIZEN_ENUMS: dict[str, list[str]] = {
     "generative_status": ["queued", "running", "completed", "failed"],
     "generative_route": ["api", "mcp"],
     "gateway_event_type": ["comfyui_run"],
+    # Authoritative agent-run ledger (T5-T8). agent_type/surface/host/sandbox_mode/approval_mode/os
+    # describe the runtime ENVELOPE so a run is reproducible across VS Code local/remote/wsl/web/sandbox
+    # and Claude/Codex approval+sandbox modes. event_kind x marker is the two-axis lifecycle model the
+    # reducer folds (marker is the reducer axis; see the (kind x marker) matrix enforced in the T6 handler).
+    "agent_type": ["codex", "claude", "other"],
+    "surface": ["vscode-extension", "cli", "app-server", "cloud", "manual"],
+    "host": ["local", "remote-ssh", "wsl", "dev-container", "windows-sandbox", "codespaces", "web", "cloud"],
+    "sandbox_mode": ["read-only", "workspace-write", "full-access", "danger-full-access", "unknown"],
+    "approval_mode": ["manual", "plan", "agent", "on-request", "on-failure", "full-access", "never"],
+    "os": ["windows", "macos", "linux"],
+    "agent_event_kind": [
+        "turn", "subagent", "tool_call", "approval",
+        "transport", "auth", "rate_limit", "context", "verification", "finalization",
+    ],
+    "agent_event_marker": [
+        "open", "close_ok", "close_fail", "close_canceled", "resolved", "declined", "timed_out", "point",
+    ],
+    "agent_failure_category": ["transport", "auth", "rate_limit", "context"],
+}
+
+
+# T6 cross-field rule: validate_against_spec checks each field's enum independently, so it would accept
+# a nonsense (event_kind, marker) pair like (transport, resolved). This map is the authoritative set of
+# allowed markers per kind; the T6 handler rejects a pair outside it (DENIED_EVENT_KIND_MARKER, exit 2).
+AGENT_EVENT_KIND_MARKERS: dict[str, list[str]] = {
+    "subagent": ["open", "close_ok", "close_fail", "close_canceled"],
+    "approval": ["open", "resolved", "declined", "timed_out"],
+    "turn": ["open", "close_ok", "close_fail"],
+    "tool_call": ["open", "close_ok", "close_fail"],
+    "transport": ["point"],
+    "auth": ["point"],
+    "rate_limit": ["point"],
+    "context": ["point"],
+    "verification": ["point"],
+    "finalization": ["close_ok", "close_fail", "close_canceled"],
 }
 
 
@@ -252,6 +287,44 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "summary": {"type": "str", "summary": True},
             "body": {"type": "str", "max_words": 1000},
             "payload": {"type": "dict"},
+        },
+    },
+    "agent_run": {
+        "required": ["agent_type", "surface", "summary"],
+        "allow_extra": False,
+        "fields": {
+            "task_id": {"type": "str"},
+            "agent_type": {"type": "str", "enum": KAIZEN_ENUMS["agent_type"]},
+            "surface": {"type": "str", "enum": KAIZEN_ENUMS["surface"]},
+            "host": {"type": "str", "enum": KAIZEN_ENUMS["host"]},
+            "sandbox_mode": {"type": "str", "enum": KAIZEN_ENUMS["sandbox_mode"]},
+            "approval_mode": {"type": "str", "enum": KAIZEN_ENUMS["approval_mode"]},
+            "os": {"type": "str", "enum": KAIZEN_ENUMS["os"]},
+            "extension_version": {"type": "str", "max_words": 10},
+            "agent_version": {"type": "str", "max_words": 10},
+            "model": {"type": "str", "max_words": 20},
+            "worktree_path": {"type": "str"},
+            "cwd": {"type": "str"},
+            "git_branch": {"type": "str", "max_words": 20},
+            "git_commit": {"type": "str", "max_words": 10},
+            "summary": {"type": "str", "summary": True},
+            "body": {"type": "str", "max_words": 1000},
+        },
+    },
+    "agent_event": {
+        "required": ["event_kind", "marker", "summary"],
+        "allow_extra": False,
+        "fields": {
+            "agent_run_id": {"type": "str"},
+            "source_event_id": {"type": "str", "max_words": 20},
+            "correlation_id": {"type": "str", "max_words": 20},
+            "event_kind": {"type": "str", "enum": KAIZEN_ENUMS["agent_event_kind"]},
+            "marker": {"type": "str", "enum": KAIZEN_ENUMS["agent_event_marker"]},
+            "code": {"type": "str", "max_words": 20},
+            "name": {"type": "str", "max_words": 40},
+            "status_message": {"type": "str", "max_words": 200},
+            "summary": {"type": "str", "summary": True},
+            "body": {"type": "str", "max_words": 1000},
         },
     },
 }

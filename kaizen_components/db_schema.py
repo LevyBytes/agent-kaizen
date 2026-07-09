@@ -587,6 +587,61 @@ DDL = [
         is_test INTEGER NOT NULL DEFAULT 0
     )
     """,
+    # Authoritative orchestration ledger (additive; SCHEMA_VERSION stays 1). agent_runs is one
+    # execution ENVELOPE per tracked agent run (runtime host/sandbox/approval reproducibility fields,
+    # SOFT-linked to task_id like the other annotational task_id columns). state/failure_category are a
+    # DENORMALIZED cache for R0/T7 display ONLY -- never authoritative: gates and the K1 child-leak
+    # invariant recompute run state from agent_events (the source of truth). is_test comes via the
+    # ADDITIVE path (root table -> TEST_ROOT_TABLES), so it is not in this CREATE DDL.
+    """
+    CREATE TABLE IF NOT EXISTS agent_runs (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        task_id TEXT,
+        agent_type TEXT NOT NULL,
+        surface TEXT NOT NULL,
+        host TEXT,
+        sandbox_mode TEXT,
+        approval_mode TEXT,
+        os TEXT,
+        extension_version TEXT,
+        agent_version TEXT,
+        model TEXT,
+        worktree_path TEXT,
+        cwd TEXT,
+        git_branch TEXT,
+        git_commit TEXT,
+        state TEXT,
+        failure_category TEXT,
+        summary TEXT NOT NULL,
+        body TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # Append-only lifecycle events for one run (child of agent_runs via the HARD agent_run_id link,
+    # K1-orphan-scanned). This is the AUTHORITATIVE input the reducer folds into run state. Each row is
+    # (event_kind x marker) with an optional correlation_id span key (child/approval/turn/tool id).
+    # sequence_no is a harness-assigned gapless MAX+1 per run (never emitter-supplied). source_event_id
+    # is a nullable vendor dedup key; the partial UNIQUE index + INSERT OR IGNORE make replay idempotent.
+    # No is_test column: purged via the parent run's is_test (TEST_PURGE_SQL cascade), like revisions.
+    """
+    CREATE TABLE IF NOT EXISTS agent_events (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        agent_run_id TEXT NOT NULL,
+        sequence_no INTEGER NOT NULL,
+        source_event_id TEXT,
+        correlation_id TEXT,
+        event_kind TEXT NOT NULL,
+        marker TEXT NOT NULL,
+        code TEXT,
+        name TEXT,
+        status_message TEXT,
+        summary TEXT NOT NULL,
+        body TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
 ]
 
 
@@ -604,7 +659,7 @@ TEST_ROOT_TABLES: tuple[str, ...] = (
     "artifacts", "eval_cases", "eval_runs", "eval_scores", "source_locks", "irl_reviews",
     "subagent_packets", "diagnostic_packets", "anti_patterns", "agentgateway_events", "reports",
     "private_policy", "improvement_proposals", "generative_runs",
-    "evidence_documents", "trace_events", "pii_scan",
+    "evidence_documents", "trace_events", "pii_scan", "agent_runs",
 )
 ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [(t, "is_test", _IS_TEST) for t in TEST_ROOT_TABLES]
 
@@ -657,6 +712,9 @@ TEST_PURGE_SQL: list[str] = [
     "DELETE FROM evidence_documents WHERE is_test = 1",
     "DELETE FROM trace_events WHERE is_test = 1",
     "DELETE FROM pii_scan WHERE is_test = 1",
+    # agent_events (child) first by its run's is_test, then the flagged runs.
+    "DELETE FROM agent_events WHERE agent_run_id IN (SELECT id FROM agent_runs WHERE is_test = 1)",
+    "DELETE FROM agent_runs WHERE is_test = 1",
 ]
 # Count query per root table so K7 can report what it removed (captured before the deletes run).
 TEST_COUNT_SQL: dict[str, str] = {t: f"SELECT COUNT(*) FROM {t} WHERE is_test = 1" for t in TEST_ROOT_TABLES}
@@ -689,6 +747,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_generative_runs_backend ON generative_runs(backend)",
     "CREATE INDEX IF NOT EXISTS idx_generative_runs_task ON generative_runs(task_id)",
     "CREATE INDEX IF NOT EXISTS idx_gen_routes_pair ON generative_run_routes(ab_pair_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_task ON agent_runs(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(agent_run_id)",
+    # Idempotent replay: a repeated (run, source_event_id) is a no-op under T6's INSERT OR IGNORE.
+    # Partial so locally-minted events (source_event_id NULL) never collide.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_source ON agent_events(agent_run_id, source_event_id) "
+    "WHERE source_event_id IS NOT NULL",
 ]
 
 
@@ -732,6 +796,7 @@ REFERENCES: list[tuple[str, str, str, str]] = [
     ("eval_scores", "verification_id", "verification_events", "id"),
     ("generative_runs", "workflow_artifact_id", "artifacts", "id"),
     ("generative_run_routes", "run_id", "generative_runs", "id"),
+    ("agent_events", "agent_run_id", "agent_runs", "id"),
 ]
 
 
@@ -778,5 +843,7 @@ def schema_manifest() -> dict[str, object]:
             "generative_runs",
             "generative_run_routes",
             "pii_scan",
+            "agent_runs",
+            "agent_events",
         ],
     }

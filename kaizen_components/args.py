@@ -125,6 +125,10 @@ ALIASES = {
     "T2": ["T2", "score-add"],
     "T3": ["T3", "trace-report"],
     "T4": ["T4", "score-query"],
+    "T5": ["T5", "agent-run-start"],
+    "T6": ["T6", "agent-event-add"],
+    "T7": ["T7", "agent-run-inspect"],
+    "T8": ["T8", "agent-run-finalize"],
     "E1": ["E1", "evidence-ingest-file"],
     "E3": ["E3", "evidence-chunk"],
     "E4": ["E4", "evidence-query"],
@@ -241,6 +245,10 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     "T2": ("Record an eval score", ("score",)),
     "T3": ("Generate a trace report", ()),
     "T4": ("Query eval scores with aggregates", ("trends", "mean")),
+    "T5": ("Open an authoritative agent run", ("orchestration", "run", "envelope", "subagent")),
+    "T6": ("Append an authoritative run event", ("orchestration", "event", "approval", "child", "lifecycle")),
+    "T7": ("Inspect one agent run's reduced state", ("orchestration", "children", "approvals", "leak", "inspect")),
+    "T8": ("Finalize an agent run, gate live work", ("orchestration", "complete", "terminal", "finalize")),
     "O1": ("Assemble an improvement-lab case set", ("lab", "trainset")),
     "O2": ("Record an improvement proposal", ("candidate", "variant")),
     "O3": ("Rank and report improvement proposals", ("leaderboard",)),
@@ -276,6 +284,10 @@ _K0_EXAMPLES = {
     "Q9": 'python kaizen.py Q9 --conclusion VERIFICATION_FAILED --json',
     "R0": 'python kaizen.py R0 --json',
     "T4": 'python kaizen.py T4 --trace-id TRACE_EVENT_ID --json',
+    "T5": 'python kaizen.py T5 --task-id TASK_ID --summary "Run." --payload-json "{\\"agent_type\\":\\"claude\\",\\"surface\\":\\"cli\\"}" --json',
+    "T6": 'python kaizen.py T6 --agent-run-id AGENT_RUN_ID --payload-json "{\\"event_kind\\":\\"subagent\\",\\"marker\\":\\"open\\",\\"correlation_id\\":\\"c1\\",\\"summary\\":\\"child\\"}" --json',
+    "T7": 'python kaizen.py T7 --agent-run-id AGENT_RUN_ID --json',
+    "T8": 'python kaizen.py T8 --agent-run-id AGENT_RUN_ID --conclusion success --summary "Done." --json',
     "X1": 'python kaizen.py X1 --title "Rule" --summary "One sentence." --body "The rule." --priority high --json',
     "X5": 'python kaizen.py X5 --json',
     "E1": 'python kaizen.py E1 --path docs/spec.md --summary "Ingest the spec." --json',
@@ -384,6 +396,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--id", help="record id")
     parser.add_argument("--task-id", help="task id")
     parser.add_argument("--trace-id", help="trace id grouping related events")
+    parser.add_argument("--agent-run-id", dest="agent_run_id", help="agent run id (T6/T7/T8)")
+    parser.add_argument("--agent-type", dest="agent_type", help="T5: agent_type (codex|claude|other)")
+    parser.add_argument("--surface", help="T5: surface (vscode-extension|cli|app-server|cloud|manual)")
     parser.add_argument("--chunker", help="chunking strategy: recursive (default) or semantic (needs an embedding backend)")
     parser.add_argument("--contract", help="improvement-lab task contract / signature name")
     parser.add_argument("--metric", help="improvement-lab metric name")
@@ -600,6 +615,17 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         if operation == "T4":
             return query_eval_scores(args)
         return trace_report(args)
+
+    if operation in {"T5", "T6", "T7", "T8"}:
+        from .agent_runs import agent_event_add, agent_run_finalize, agent_run_inspect, agent_run_start
+
+        if operation == "T5":
+            return agent_run_start(args)
+        if operation == "T6":
+            return agent_event_add(args)
+        if operation == "T7":
+            return agent_run_inspect(args)
+        return agent_run_finalize(args)
 
     if operation in {"E1", "E3", "E4", "E5"}:
         from .evidence import chunk_document, ingest_file, inspect_evidence, query_evidence

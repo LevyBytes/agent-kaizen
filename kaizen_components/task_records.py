@@ -19,6 +19,11 @@ LIFECYCLE_TABLES = {
     "tasks": ("tasks", "task_revision", "task_id", "t"),
 }
 
+# W2 completion vocabulary. task.status is free-form (any string), so this is a closed set of
+# completion-intent statuses matched strip().lower(); reaching one while a linked agent run still has
+# live children/approvals is denied (recorded orchestration truth outranks a premature "done").
+_TERMINAL_TASK_STATUSES = {"done", "completed", "resolved", "closed"}
+
 
 def _text_arg(args: Any, name: str, default: str = "") -> str:
     value = getattr(args, name, None)
@@ -156,8 +161,27 @@ def update_lifecycle_record(kind: str, args: Any) -> dict[str, Any]:
     created = now()
     revision_count = fetch_one(f"SELECT COUNT(*) FROM {rev_table} WHERE {rev_fk} = ?", (record_id,))[0]
     content_hash = utc_text_hash({"id": record_id, "summary": summary, "body": body, "status": status})
+    gate_terminal = kind == "tasks" and (status or "").strip().lower() in _TERMINAL_TASK_STATUSES
 
     def op(conn: Any, _attempt: int) -> None:
+        # Completion gate, recomputed from agent_events on THIS write connection (no TOCTOU window):
+        # a task cannot reach a terminal status while a linked, non-terminal agent run still has an
+        # open child or unresolved approval. Fail-open: non-task kinds and non-terminal statuses skip.
+        if gate_terminal:
+            from .agent_runs import task_live_orchestration
+
+            block = task_live_orchestration(conn, record_id)
+            if block:
+                raise KaizenDenied(
+                    "DENIED_TASK_HAS_LIVE_CHILDREN",
+                    {
+                        "task_id": record_id,
+                        "status": status,
+                        **block,
+                        "required_action": "finalize the linked agent run(s) with T8 before closing the task",
+                    },
+                    exit_code=2,
+                )
         conn.execute(
             f"UPDATE {table} SET updated_at = ?, summary = ?, body = ?, status = ?, "
             "content_hash = ?, current_revision_id = ? WHERE id = ?",

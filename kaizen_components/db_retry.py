@@ -11,6 +11,12 @@ TOTAL_SECONDS = 4.0
 
 
 def is_retryable(error: BaseException) -> bool:
+    # A KaizenDenied is a deliberate, structured denial (validation, a completion gate, not-found) --
+    # never a transient DB fault -- so it must propagate immediately even when raised INSIDE a
+    # write_tx op. Short-circuit before the message heuristic below, whose substring match would
+    # otherwise mis-catch a denial whose payload merely contains a trigger word (e.g. "blocking").
+    if isinstance(error, KaizenDenied):
+        return False
     # "lock" covers turso's Windows file-lock contention ("Locking error: Failed locking
     # file ... (os error 33)") and SQLite's "database is locked" — both transient under
     # concurrent processes and exactly what the backoff budget exists to absorb.

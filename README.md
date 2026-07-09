@@ -20,7 +20,7 @@ This repo is an **active foundation**: it is usable now, but always evolving, an
 
 ## Benchmarks Preview
 
-Proof is in the pudding: record writes land in under 30 ms, a full session-start digest reads back in ~0.21 s at 5,000 records, and restoring context from records is ~28× cheaper than replaying a session transcript — measured, repeatable, on your machine: see [Benchmarks](#benchmarks).
+Proof is in the pudding: record writes land in under 30 ms, a full session-start digest reads back in ~0.11 s at 5,000 records, and restoring context from records is ~28× cheaper than replaying a session transcript — measured, repeatable, on your machine: see [Benchmarks](#benchmarks).
 
 ## Contents
 
@@ -495,6 +495,10 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `T2`  | `score-add`                | Record an eval score                   |
 | `T3`  | `trace-report`             | Generate a trace report                |
 | `T4`  | `score-query`              | Query eval scores with aggregates      |
+| `T5`  | `agent-run-start`          | Open an authoritative agent run        |
+| `T6`  | `agent-event-add`          | Append an authoritative run event      |
+| `T7`  | `agent-run-inspect`        | Inspect one agent run's reduced state  |
+| `T8`  | `agent-run-finalize`       | Finalize an agent run, gate live work  |
 | `O1`  | `lab-assemble`             | Assemble an improvement-lab case set   |
 | `O2`  | `lab-propose`              | Record an improvement proposal         |
 | `O3`  | `lab-report`               | Rank and report improvement proposals  |
