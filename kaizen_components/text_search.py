@@ -14,10 +14,6 @@ scale. A full-text path is deferred until Turso's native FTS graduates from expe
 
 from __future__ import annotations
 
-# The escape character used in the paired ``... LIKE ? ESCAPE '\\'`` SQL clause.
-LIKE_ESCAPE = "\\"
-
-
 def like_pattern(query: str) -> str:
     """Return a ``%``-wrapped LIKE pattern with ``\\``, ``%`` and ``_`` escaped literally.
 

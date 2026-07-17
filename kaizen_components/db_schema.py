@@ -1,3 +1,5 @@
+"""Declare the additive Kaizen and fleet schemas, indexes, purge rules, integrity references, and manifest hashes."""
+
 from __future__ import annotations
 
 import hashlib
@@ -642,6 +644,148 @@ DDL = [
         content_hash TEXT NOT NULL
     )
     """,
+    # Orchestration session records (v8 M2 / C1-C5, additive; SCHEMA_VERSION stays 1). agent_sessions
+    # is one controlled session envelope: controller/mode carry the v8 workflow enums (see
+    # orchestration.modes CONTROLLERS / SESSION_MODES), auth_mode the billing lane (none|subscription|api-key -- the
+    # subscription/api-key value space is RESERVED for the deferred M-CLAUDE Claude lanes, accepted now
+    # with no live producer). owning_node/node_epoch are the fleet fence columns (NULL until the daemon
+    # writes them); vendor_session_root_id/vendor_thread_id key back to the vendor session (forks keep
+    # the root). is_test via the ADDITIVE path (root table -> TEST_ROOT_TABLES), not this CREATE DDL.
+    """
+    CREATE TABLE IF NOT EXISTS agent_sessions (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        task_id TEXT,
+        controller TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        engine TEXT,
+        auth_mode TEXT NOT NULL,
+        owning_node TEXT,
+        node_epoch INTEGER,
+        vendor_session_root_id TEXT,
+        vendor_thread_id TEXT,
+        cwd TEXT,
+        git_branch TEXT,
+        state TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # Session-scoped user instruction records (child of agent_sessions via session_id). Append-only:
+    # one row per instruction the controller injects into a session. seq is a per-session gapless
+    # ordinal so C5 renders instructions in submission order. is_test via the ADDITIVE path.
+    """
+    CREATE TABLE IF NOT EXISTS user_instructions (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        instruction TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # Goal create/update lifecycle (child of agent_sessions). The Kaizen goal is the canonical
+    # cross-vendor goal projection (engines with no native goal store map to C3). state tracks the
+    # goal lifecycle; C3 update rewrites the row in place (no revision table -- goals are lightweight
+    # and their history is the session timeline). is_test via the ADDITIVE path.
+    """
+    CREATE TABLE IF NOT EXISTS goals (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        body TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # Approval-request view projection (child of agent_sessions). correlation_id keys back to an
+    # agent_events span (the supervisor's approval span); request_type/state are the C4 state machine
+    # (state {open, approved, denied, canceled, cleared_by_engine, deferred}). decided_by {auto|human}
+    # and rule_id stay NULL until a decision lands. C4 update is the state machine: an already-decided
+    # request refuses re-decision. is_test via the ADDITIVE path.
+    """
+    CREATE TABLE IF NOT EXISTS approval_requests (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        correlation_id TEXT,
+        request_type TEXT NOT NULL,
+        state TEXT NOT NULL,
+        decided_by TEXT,
+        rule_id TEXT,
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # Named per-engine mode profiles (v8 M2 exit criterion). profile_json is an EXTENSIBLE per-engine
+    # JSON mapping keyed by engine (validated per-engine at consume time): Claude's permission-mode /
+    # allow-rules shape drops in additively at M-CLAUDE with ZERO migration -- this shape is the hard
+    # contract. Config-like root table; carries is_test via the ADDITIVE path so live-test profiles purge.
+    """
+    CREATE TABLE IF NOT EXISTS mode_profiles (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        name TEXT NOT NULL,
+        profile_json TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # Typed policy-authority rules for the M3 decision chokepoint (additive; SCHEMA_VERSION stays 1).
+    # Each row is one DB-overridable allow/ask/deny rule the PolicyEngine layers UNDER the code
+    # INVARIANTS (a rule can never widen a hard-deny). rule_type {allow,ask,deny}; verb the policy verb
+    # ('any' = every verb); match_kind {exact_command, path_prefix}; pattern the normal-form command or
+    # canonical path prefix; engine NULL matches any engine, else must equal the actor engine; enabled
+    # gates the row (disabled = ignored). SCHEMA-ONLY until a live producer -- validated via the
+    # 'authority_rule' kind and stored/loaded by orchestration.policy (store_rule/load_rules); no CLI op
+    # or args.py wiring lands here (the mode_profiles precedent). is_test via the ADDITIVE path (root
+    # table -> TEST_ROOT_TABLES), so it is not in this CREATE DDL.
+    """
+    CREATE TABLE IF NOT EXISTS authority_rules (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        rule_type TEXT NOT NULL,
+        verb TEXT NOT NULL,
+        match_kind TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        engine TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    # v8 M13 backend registry (B8) -- remote model endpoints normalized into kaizen.db (relational >
+    # JSON blob, plan §C.3). One row per advertised endpoint: base_url + the lanes it serves
+    # (JSON list subset of ["embed","text","judge","rerank"]) + the model it exposes. priority orders
+    # failover (lower = tried first, matching how a preference list reads); health/last_probe are the
+    # B8 --probe health cache the resolver reads WITHOUT re-probing (no hot loop); enabled gates a row
+    # out of resolution without deleting it. node_id soft-links a fleet node (the model-server that
+    # advertises it; NULL for a plain local/env endpoint). Env vars remain the zero-config single-endpoint
+    # path -- an empty table means resolve_endpoint() returns None and callers fall back to the env-var
+    # backend UNCHANGED. is_test via the ADDITIVE path (root table -> TEST_ROOT_TABLES), not this CREATE DDL.
+    # content_hash remains nullable for legacy schema compatibility; backend_registry always writes it.
+    """
+    CREATE TABLE IF NOT EXISTS backend_endpoints (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        node_id TEXT,
+        base_url TEXT NOT NULL,
+        lanes TEXT NOT NULL,
+        model TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 100,
+        health TEXT,
+        last_probe TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        content_hash TEXT
+    )
+    """,
 ]
 
 
@@ -660,8 +804,61 @@ TEST_ROOT_TABLES: tuple[str, ...] = (
     "subagent_packets", "diagnostic_packets", "anti_patterns", "agentgateway_events", "reports",
     "private_policy", "improvement_proposals", "generative_runs",
     "evidence_documents", "trace_events", "pii_scan", "agent_runs",
+    # v8 M2 session records (each is a root that carries is_test via the ADDITIVE path).
+    "agent_sessions", "user_instructions", "goals", "approval_requests", "mode_profiles",
+    # v8 M3 policy authority rules (root; is_test via the ADDITIVE path).
+    "authority_rules",
+    # v8 M13 backend registry endpoints (root; is_test via the ADDITIVE path so live-test rows purge).
+    "backend_endpoints",
 )
 ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [(t, "is_test", _IS_TEST) for t in TEST_ROOT_TABLES]
+# v8 M9 fleet fence columns on kaizen.db root tables (NULL-default; applied via the ADDITIVE path so
+# ddl_sha256 / the manifest is UNCHANGED -- no SCHEMA_VERSION bump, no K1 --restamp-manifest). SCHEMA-ONLY
+# in M9: no producer writes them yet (the daemon fills node_id/owning_node/node_epoch at M10a+).
+# owning_node/node_epoch also appear in current CREATE DDL for fresh databases; retaining them here
+# migrates older live databases that predate those inline columns.
+ADDITIVE_COLUMNS += [
+    ("agent_runs", "node_id", "TEXT"),
+    ("agent_runs", "backend_endpoint_id", "TEXT"),
+    ("agent_sessions", "owning_node", "TEXT"),
+    ("agent_sessions", "node_epoch", "INTEGER"),
+]
+# v8 H2.1 conversation-profile columns (all nullable; applied via the ADDITIVE path so ddl_sha256 / the
+# manifest is UNCHANGED -- no SCHEMA_VERSION bump). agent_sessions carries the REQUESTED (owner-selected)
+# model/effort + the UI permission_mode (plan|ask|agent|full -- distinct from agent_sessions.mode, which
+# keeps orchestration semantics) + the immutable profile_hash. agent_runs carries the same per-run plus
+# session_id (soft link to the C1 envelope, no cascade -- runs are audit evidence), engine, auth_mode, and
+# reasoning_effort (the EFFECTIVE effort; agent_runs.model stays the EFFECTIVE model). Legacy rows with
+# NULL H2 metadata stay readable everywhere.
+ADDITIVE_COLUMNS += [
+    ("agent_sessions", "requested_model", "TEXT"),
+    ("agent_sessions", "requested_reasoning_effort", "TEXT"),
+    ("agent_sessions", "permission_mode", "TEXT"),
+    ("agent_sessions", "profile_hash", "TEXT"),
+    # Harness UI v4 P0: the sole additive schema column for this milestone. Nullable keeps every
+    # pre-v4/observed session readable; driven starts derive the canonical value before C1.
+    ("agent_sessions", "title", "TEXT"),
+    # Conversation continuation (owner ask 2026-07-10): the C1 stores its immutable policy snapshot
+    # JSON so a daemon restart rehydrates the ORIGINAL captured inputs (never live rules); NULL on
+    # legacy rows (simply not resumable). vendor_session_root_id (base column) carries the driven
+    # vendor resume key, mirroring its observed-session use.
+    ("agent_sessions", "policy_snapshot", "TEXT"),
+    ("agent_runs", "session_id", "TEXT"),
+    ("agent_runs", "engine", "TEXT"),
+    ("agent_runs", "auth_mode", "TEXT"),
+    ("agent_runs", "requested_model", "TEXT"),
+    ("agent_runs", "requested_reasoning_effort", "TEXT"),
+    ("agent_runs", "reasoning_effort", "TEXT"),
+    ("agent_runs", "permission_mode", "TEXT"),
+    ("agent_runs", "profile_hash", "TEXT"),
+]
+# v8 H2.1 additive indexes: applied alongside ADDITIVE_COLUMNS at connect, deliberately NOT in the
+# hashed INDEXES list (the FTS_INDEX_SQL precedent) -- folding them in would shift
+# expected_manifest_hash for every existing DB and force K1 --restamp-manifest.
+ADDITIVE_INDEX_SQL: list[str] = [
+    # Linked-run lookup (session/list aggregates a C1 session's ordered T5 runs by session_id).
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_session_id ON agent_runs(session_id)",
+]
 
 
 # Test-record purge cascade (K7): delete children by their parent link first, then every flagged root.
@@ -715,9 +912,29 @@ TEST_PURGE_SQL: list[str] = [
     # agent_events (child) first by its run's is_test, then the flagged runs.
     "DELETE FROM agent_events WHERE agent_run_id IN (SELECT id FROM agent_runs WHERE is_test = 1)",
     "DELETE FROM agent_runs WHERE is_test = 1",
+    # v8 M2 session records: session-scoped children (own is_test OR parent session is_test) first,
+    # then the flagged session/profile roots. mode_profiles is standalone (no session link).
+    "DELETE FROM user_instructions WHERE is_test = 1 "
+    "OR session_id IN (SELECT id FROM agent_sessions WHERE is_test = 1)",
+    "DELETE FROM goals WHERE is_test = 1 "
+    "OR session_id IN (SELECT id FROM agent_sessions WHERE is_test = 1)",
+    "DELETE FROM approval_requests WHERE is_test = 1 "
+    "OR session_id IN (SELECT id FROM agent_sessions WHERE is_test = 1)",
+    "DELETE FROM agent_sessions WHERE is_test = 1",
+    "DELETE FROM mode_profiles WHERE is_test = 1",
+    # v8 M3 policy authority rules (standalone root; no session link).
+    "DELETE FROM authority_rules WHERE is_test = 1",
+    # v8 M13 backend registry (standalone config root; no children).
+    "DELETE FROM backend_endpoints WHERE is_test = 1",
 ]
 # Count query per root table so K7 can report what it removed (captured before the deletes run).
 TEST_COUNT_SQL: dict[str, str] = {t: f"SELECT COUNT(*) FROM {t} WHERE is_test = 1" for t in TEST_ROOT_TABLES}
+TEST_COUNT_SQL.update(
+    {
+        "chunk_embeddings": "SELECT COUNT(*) FROM chunk_embeddings WHERE is_test = 1",
+        "generative_run_routes": "SELECT COUNT(*) FROM generative_run_routes WHERE is_test = 1",
+    }
+)
 
 
 INDEXES = [
@@ -753,12 +970,127 @@ INDEXES = [
     # Partial so locally-minted events (source_event_id NULL) never collide.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_source ON agent_events(agent_run_id, source_event_id) "
     "WHERE source_event_id IS NOT NULL",
+    # v8 M2 session records (C5 timeline joins children by session_id).
+    "CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_sessions(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_user_instructions_session ON user_instructions(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_goals_session ON goals(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_approval_requests_session ON approval_requests(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_approval_requests_corr ON approval_requests(correlation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_mode_profiles_name ON mode_profiles(name)",
+    # v8 M3 policy authority rules (load_rules() scans by verb).
+    "CREATE INDEX IF NOT EXISTS idx_authority_rules_verb ON authority_rules(verb)",
+    # v8 M13 backend registry (resolve_endpoint orders enabled rows by priority).
+    "CREATE INDEX IF NOT EXISTS idx_backend_endpoints_priority ON backend_endpoints(enabled, priority)",
+]
+
+
+# --- v8 M9 fleet.db schema (SEPARATE synced coordination DB) ---------------------------------------
+# FLEET_DDL/FLEET_INDEXES describe the DAEMON-OWNED fleet.db, applied by FleetStore -- NOT kaizen.db.
+# They are DELIBERATELY not added to DDL, INDEXES, the schema_manifest tables list, or anything hashed
+# by ddl_sha256: fleet.db has its own version stamp (fleet_schema, version 1) and is disposable
+# (re-bootstrappable from the hub), so it must have ZERO impact on kaizen.db's manifest (a K1
+# manifest_match invariant proves this). Tables per plan v8 §B.1/§4:
+#   nodes/projects            -- fleet membership + project registry
+#   coord_events              -- append-only coordination ledger (PK node-tagged; the reducer input)
+#   remote_services/dispatches-- advertised endpoints + dispatched runs (M11+/M14 producers)
+# leases are a REDUCER PROJECTION of coord_events (never a mutable mutex row) -- no leases table.
+FLEET_SCHEMA_VERSION = 1
+FLEET_DDL: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS fleet_schema (
+        id TEXT PRIMARY KEY,
+        fleet_schema_version INTEGER NOT NULL,
+        applied_at TEXT NOT NULL
+    )
+    """,
+    # One row per fleet node. tailnet_name is a MagicDNS name (never a raw IP/username); pubkey is
+    # NULL until M11 (Ed25519 signing). capabilities_json carries has_gpu/model_endpoints/is_pinned.
+    """
+    CREATE TABLE IF NOT EXISTS nodes (
+        node_id TEXT PRIMARY KEY,
+        role TEXT,
+        tailnet_name TEXT,
+        os TEXT,
+        arch TEXT,
+        capabilities_json TEXT,
+        pubkey TEXT,
+        last_heartbeat TEXT,
+        registered_at TEXT,
+        updated_at TEXT
+    )
+    """,
+    # Deterministic project registry (project_id derived per fleet.identity.project_id -> same id on
+    # every mirror). hub_remote/sync_url point at the hub's two services (git bare + turso sync-server).
+    """
+    CREATE TABLE IF NOT EXISTS projects (
+        project_id TEXT PRIMARY KEY,
+        name TEXT,
+        hub_remote TEXT,
+        sync_url TEXT,
+        registered_at TEXT
+    )
+    """,
+    # Append-only coordination ledger -- the AUTHORITATIVE input the pure reducers fold (leases,
+    # coordinator role). PK is node-tagged (fleet.identity.coord_id) so LWW sync only ever merges
+    # DISTINCT rows. source_event_id is a nullable dedupe key (partial UNIQUE index below + INSERT OR
+    # IGNORE => idempotent replay). sig is NULL until M11. content_hash covers the row core.
+    """
+    CREATE TABLE IF NOT EXISTS coord_events (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        project_id TEXT,
+        event_kind TEXT NOT NULL,
+        marker TEXT NOT NULL,
+        scope_key TEXT,
+        epoch INTEGER,
+        payload_json TEXT,
+        source_event_id TEXT,
+        content_hash TEXT,
+        sig TEXT
+    )
+    """,
+    # Advertised model endpoints / compute / workspace workers (M11+/M13 producers).
+    """
+    CREATE TABLE IF NOT EXISTS remote_services (
+        id TEXT PRIMARY KEY,
+        node_id TEXT,
+        kind TEXT,
+        base_url TEXT,
+        lanes_json TEXT,
+        registered_at TEXT,
+        updated_at TEXT
+    )
+    """,
+    # Dispatched runs (target node, required leases, status) -- M14 remote-dispatch producer.
+    """
+    CREATE TABLE IF NOT EXISTS remote_dispatches (
+        id TEXT PRIMARY KEY,
+        created_at TEXT,
+        target_node_id TEXT,
+        required_leases_json TEXT,
+        status TEXT,
+        payload_json TEXT
+    )
+    """,
+]
+FLEET_INDEXES: list[str] = [
+    "CREATE INDEX IF NOT EXISTS idx_coord_events_created ON coord_events(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_coord_events_kind ON coord_events(event_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_coord_events_node ON coord_events(node_id)",
+    # Idempotent replay: a repeated source_event_id is a no-op under INSERT OR IGNORE. Partial so
+    # locally-minted events (source_event_id NULL) never collide.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_coord_events_source ON coord_events(source_event_id) "
+    "WHERE source_event_id IS NOT NULL",
 ]
 
 
 def ddl_sha256() -> str:
     """Hash of the actual DDL + index text, so manifest comparisons catch edits that
-    change table shapes without a SCHEMA_VERSION/MIGRATION_ID bump."""
+    change table shapes without a SCHEMA_VERSION/MIGRATION_ID bump.
+
+    Deliberately covers ONLY kaizen.db's DDL/INDEXES -- fleet.db's FLEET_DDL/FLEET_INDEXES are a
+    separate, disposable, hub-syncable schema and must NOT shift kaizen.db's manifest hash."""
     text = "\n".join(stmt.strip() for stmt in (*DDL, *INDEXES))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -790,6 +1122,7 @@ REFERENCES: list[tuple[str, str, str, str]] = [
     ("evidence_blocks", "document_id", "evidence_documents", "id"),
     ("evidence_chunks", "document_id", "evidence_documents", "id"),
     ("evidence_chunks", "source_lock_id", "source_locks", "id"),
+    ("chunk_embeddings", "chunk_id", "evidence_chunks", "id"),
     ("eval_runs", "eval_case_id", "eval_cases", "id"),
     ("eval_scores", "trace_event_id", "trace_events", "id"),
     ("eval_scores", "eval_run_id", "eval_runs", "id"),
@@ -797,10 +1130,15 @@ REFERENCES: list[tuple[str, str, str, str]] = [
     ("generative_runs", "workflow_artifact_id", "artifacts", "id"),
     ("generative_run_routes", "run_id", "generative_runs", "id"),
     ("agent_events", "agent_run_id", "agent_runs", "id"),
+    # v8 M2 session records: session-scoped children -> their session.
+    ("user_instructions", "session_id", "agent_sessions", "id"),
+    ("goals", "session_id", "agent_sessions", "id"),
+    ("approval_requests", "session_id", "agent_sessions", "id"),
 ]
 
 
 def schema_manifest() -> dict[str, object]:
+    """Returns the version/migration/tool/ddl-hash + ordered kaizen.db `tables` list; ordering & membership are load-bearing (hashed into expected_manifest_hash) so any table add here shifts the manifest and requires K1 --restamp-manifest."""
     return {
         "schema_version": SCHEMA_VERSION,
         "migration_id": MIGRATION_ID,
@@ -845,5 +1183,12 @@ def schema_manifest() -> dict[str, object]:
             "pii_scan",
             "agent_runs",
             "agent_events",
+            "agent_sessions",
+            "user_instructions",
+            "goals",
+            "approval_requests",
+            "mode_profiles",
+            "authority_rules",
+            "backend_endpoints",
         ],
     }

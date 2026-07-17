@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .comfyui import _endpoint, probe
+from .comfyui import _PROBE_TIMEOUT, _endpoint, _timeout_arg, probe
 from .db import now
 from .denials import KaizenDenied
 from .paths import AI_ROOT, REPO_ROOT, repo_relative
@@ -42,10 +42,16 @@ def _venv_python(home: Path) -> Path:
     return _venv_dir(home) / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def _port(args: Any) -> int:
+def _runtime_endpoint(args: Any) -> tuple[str, str, int]:
+    """Return the exact managed listen host, probe URL, and port for a loopback endpoint."""
     import urllib.parse
 
-    return urllib.parse.urlparse(_endpoint(args)).port or 8188
+    parsed = urllib.parse.urlparse(_endpoint(args))
+    host = parsed.hostname or "127.0.0.1"
+    listen_host = "127.0.0.1" if host == "localhost" else host
+    port = parsed.port or 8188
+    display_host = f"[{listen_host}]" if ":" in listen_host else listen_host
+    return listen_host, f"http://{display_host}:{port}", port
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -89,14 +95,19 @@ def _write_pidfile(data: dict[str, Any]) -> None:
     _PIDFILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def _reachable(args: Any, probe_timeout: float = 5.0) -> bool:
-    # probe_timeout is the per-probe socket cap, kept small and decoupled from --timeout
-    # (which governs only the overall poll deadline in start/stop, never a single probe).
+def _probe_if_reachable(endpoint: str, probe_timeout: float = _PROBE_TIMEOUT) -> dict[str, Any] | None:
+    """Return system stats when reachable, else ``None`` without masking the caller's deadline."""
     try:
-        probe(_endpoint(args), timeout=probe_timeout)
-        return True
+        return probe(endpoint, timeout=probe_timeout)
     except Exception:  # noqa: BLE001 -- unreachable is a valid, non-fatal status signal
-        return False
+        return None
+
+
+def _prune_logs(*, keep: int = 10) -> None:
+    """Bound managed-runtime log accumulation to the newest ``keep`` files."""
+    logs = sorted(_STATE_DIR.glob("server-*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in logs[keep:]:
+        path.unlink(missing_ok=True)
 
 
 def _missing_denial(home: Path) -> KaizenDenied:
@@ -114,7 +125,9 @@ def _missing_denial(home: Path) -> KaizenDenied:
 
 
 def runtime_status(args: Any) -> dict[str, Any]:
+    """Report managed runtime installation, pidfile, endpoint, and reachability without mutation."""
     home = _runtime_home()
+    _listen_host, endpoint, _port_number = _runtime_endpoint(args)
     return {
         "status": "OK",
         "action": "status",
@@ -123,12 +136,13 @@ def runtime_status(args: Any) -> dict[str, Any]:
         "main_py": (home / "main.py").is_file(),
         "venv_python": _venv_python(home).is_file(),
         "pidfile": _read_pidfile(),
-        "endpoint": _endpoint(args),
-        "reachable": _reachable(args),
+        "endpoint": endpoint,
+        "reachable": _probe_if_reachable(endpoint) is not None,
     }
 
 
 def runtime_provision(args: Any) -> dict[str, Any]:
+    """Validate the managed runtime layout; never download or install anything."""
     home = _runtime_home()
     if (home / "main.py").is_file() and _venv_python(home).is_file():
         return {"status": "OK", "action": "provision", "provisioned": True, "runtime_home": str(home)}
@@ -136,18 +150,20 @@ def runtime_provision(args: Any) -> dict[str, Any]:
 
 
 def runtime_start(args: Any) -> dict[str, Any]:
+    """Start one detached loopback process, record its pid/log, and verify readiness by deadline."""
     home = _runtime_home()
     if not ((home / "main.py").is_file() and _venv_python(home).is_file()):
         raise _missing_denial(home)
     existing = _read_pidfile()
-    if existing and _pid_alive(existing.get("pid")) and _reachable(args):
+    listen_host, endpoint, port = _runtime_endpoint(args)
+    if existing and _pid_alive(existing.get("pid")):
         raise KaizenDenied(
             "DENIED_RUNTIME_ALREADY_RUNNING",
-            {"pid": existing.get("pid"), "endpoint": _endpoint(args), "required_action": "use Y6 --action stop first"},
+            {"pid": existing.get("pid"), "endpoint": endpoint, "required_action": "use Y6 --action stop first"},
             exit_code=2,
         )
-    port = _port(args)
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _prune_logs(keep=9)
     stamp = "".join(ch for ch in now() if ch.isdigit())
     log_path = _STATE_DIR / f"server-{stamp}.log"
     flags = 0
@@ -156,26 +172,34 @@ def runtime_start(args: Any) -> dict[str, Any]:
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     with log_path.open("ab") as log:
         proc = subprocess.Popen(
-            [str(_venv_python(home)), "main.py", "--port", str(port), "--listen", "127.0.0.1"],
+            [str(_venv_python(home)), "main.py", "--port", str(port), "--listen", listen_host],
             cwd=str(home), stdout=log, stderr=subprocess.STDOUT, creationflags=flags,
         )
     _write_pidfile({"pid": proc.pid, "port": port, "started_at": now(), "log": repo_relative(log_path)})
-    deadline = time.monotonic() + float(getattr(args, "timeout", None) or 120)
+    deadline = time.monotonic() + _timeout_arg(args, "timeout", 120.0)
     while time.monotonic() < deadline:
-        if _reachable(args, probe_timeout=min(5.0, max(0.1, deadline - time.monotonic()))):
-            stats = probe(_endpoint(args), timeout=5)
+        stats = _probe_if_reachable(
+            endpoint,
+            probe_timeout=min(_timeout_arg(args, "probe_timeout", _PROBE_TIMEOUT), max(0.1, deadline - time.monotonic())),
+        )
+        if stats is not None:
             system = stats.get("system", {}) if isinstance(stats, dict) else {}
             return {
                 "status": "OK",
                 "action": "start",
                 "pid": proc.pid,
                 "port": port,
-                "endpoint": _endpoint(args),
+                "endpoint": endpoint,
                 "log": repo_relative(log_path),
                 "comfyui_version": system.get("comfyui_version"),
             }
         time.sleep(1.0)
     proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
     _PIDFILE.unlink(missing_ok=True)
     raise KaizenDenied(
         "DENIED_RUN_TIMEOUT",
@@ -185,6 +209,7 @@ def runtime_start(args: Any) -> dict[str, Any]:
 
 
 def runtime_stop(args: Any) -> dict[str, Any]:
+    """Signal the pidfile process and report stopped only after process death is observed."""
     data = _read_pidfile()
     if data is None:
         return {"status": "OK", "action": "stop", "stopped": False, "reason": "no pidfile"}
@@ -199,9 +224,15 @@ def runtime_stop(args: Any) -> dict[str, Any]:
         return {"status": "OK", "action": "stop", "stopped": False, "reason": str(error), "stale_pidfile_removed": True}
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
-        if not _reachable(args, probe_timeout=min(5.0, max(0.1, deadline - time.monotonic()))):
+        if not _pid_alive(pid):
             break
         time.sleep(0.5)
+    if _pid_alive(pid):
+        raise KaizenDenied(
+            "DENIED_RUNTIME_STOP_TIMEOUT",
+            {"pid": pid, "required_action": "inspect the process and retry stop; pidfile was retained"},
+            exit_code=1,
+        )
     _PIDFILE.unlink(missing_ok=True)
     return {"status": "OK", "action": "stop", "stopped": True, "pid": pid}
 
@@ -226,8 +257,10 @@ def _torch_report(home: Path) -> dict[str, Any]:
 
 
 def runtime_doctor(args: Any) -> dict[str, Any]:
+    """Probe the managed runtime and report ComfyUI, Python, Torch, CUDA, GPU, and disk metadata."""
     home = _runtime_home()
-    stats = probe(_endpoint(args), timeout=float(getattr(args, "timeout", None) or 5))  # capability gate: denies if unreachable
+    _listen_host, endpoint, _port_number = _runtime_endpoint(args)
+    stats = probe(endpoint, timeout=_timeout_arg(args, "probe_timeout", _PROBE_TIMEOUT))
     system = stats.get("system", {}) if isinstance(stats, dict) else {}
     devices = stats.get("devices", []) if isinstance(stats, dict) else []
     torch = _torch_report(home)
@@ -243,7 +276,7 @@ def runtime_doctor(args: Any) -> dict[str, Any]:
         "status": "OK",
         "action": "doctor",
         "runtime_home": str(home),
-        "endpoint": _endpoint(args),
+        "endpoint": endpoint,
         "comfyui_version": system.get("comfyui_version"),
         "python_version": system.get("python_version"),
         "gpu": gpu_name,

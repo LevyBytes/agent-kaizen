@@ -1,0 +1,273 @@
+{
+  "name": "kaizen-controller",
+  "displayName": "Kaizen Controller",
+  "description": "Controlling-harness UI for the Kaizen supervisor daemon: approvals queue, session timelines, fleet digest, steer/attach/orchestrate over the owner-only loopback.",
+  "version": "0.1.0",
+  "publisher": "agent-kaizen",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LevyBytes/agent-kaizen"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/src/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kaizen",
+          "title": "Kaizen",
+          "icon": "media/kaizen.svg"
+        }
+      ]
+    },
+    "views": {
+      "kaizen": [
+        {
+          "id": "kaizenApprovals",
+          "name": "Approvals"
+        },
+        {
+          "id": "kaizenSessions",
+          "name": "Sessions & Timeline"
+        },
+        {
+          "id": "kaizenFleet",
+          "name": "Fleet & Engines"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kaizen.refresh",
+        "title": "Kaizen: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "kaizen.approve",
+        "title": "Kaizen: Approve",
+        "icon": "$(check)"
+      },
+      {
+        "command": "kaizen.deny",
+        "title": "Kaizen: Deny",
+        "icon": "$(close)"
+      },
+      {
+        "command": "kaizen.steer",
+        "title": "Kaizen: Steer Session"
+      },
+      {
+        "command": "kaizen.setGoal",
+        "title": "Kaizen: Set Session Goal"
+      },
+      {
+        "command": "kaizen.bindSession",
+        "title": "Kaizen: Bind Session Pane"
+      },
+      {
+        "command": "kaizen.unbindSession",
+        "title": "Kaizen: Unbind Session Pane"
+      },
+      {
+        "command": "kaizen.attach",
+        "title": "Kaizen: Attach Session Here"
+      },
+      {
+        "command": "kaizen.orchestrate",
+        "title": "Kaizen: Orchestrate (dispatch to this node)"
+      },
+      {
+        "command": "kaizen.openChat",
+        "title": "Kaizen: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "kaizen.newConversation",
+        "title": "Kaizen: New Conversation"
+      },
+      {
+        "command": "kaizen.history",
+        "title": "Kaizen: Conversation History"
+      },
+      {
+        "command": "kaizen.focusInput",
+        "title": "Kaizen: Focus Chat Input"
+      },
+      {
+        "command": "kaizen.reopenClosed",
+        "title": "Kaizen: Reopen Closed Conversation"
+      },
+      {
+        "command": "kaizen.addFile",
+        "title": "Kaizen: Add File Context"
+      },
+      {
+        "command": "kaizen.addSelection",
+        "title": "Kaizen: Add Selection Context"
+      },
+      {
+        "command": "kaizen.addImage",
+        "title": "Kaizen: Add Image"
+      },
+      {
+        "command": "kaizen.acceptDiff",
+        "title": "Kaizen: Accept Active Diff"
+      },
+      {
+        "command": "kaizen.rejectDiff",
+        "title": "Kaizen: Reject Active Diff"
+      },
+      {
+        "command": "kaizen.showLogs",
+        "title": "Kaizen: Show Logs"
+      },
+      {
+        "command": "kaizen.tailSession",
+        "title": "Kaizen: New Conversation (Compatibility)"
+      },
+      {
+        "command": "kaizen.startDaemon",
+        "title": "Kaizen: Start Daemon (visible terminal)",
+        "icon": "$(play)"
+      },
+      {
+        "command": "kaizen.stopDaemon",
+        "title": "Kaizen: Stop Daemon (graceful shutdown)",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "kaizen.testExtension.open",
+        "title": "Kaizen: Open Test Extension"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "kaizen.openChat",
+        "key": "ctrl+alt+j"
+      },
+      {
+        "command": "kaizen.newConversation",
+        "key": "ctrl+alt+n"
+      },
+      {
+        "command": "kaizen.addSelection",
+        "key": "ctrl+alt+a"
+      }
+    ],
+    "viewsWelcome": [
+      {
+        "view": "kaizenSessions",
+        "contents": "No bound sessions yet.\n[$(comment-discussion) Open Chat](command:kaizen.openChat)\nStart a governed agent turn, or bind a session pane to see its timeline here."
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "kaizen.openChat",
+          "when": "view =~ /^kaizen/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "kaizen.refresh",
+          "when": "view =~ /^kaizen/",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "kaizen.startDaemon",
+          "when": "view == kaizenFleet && viewItem == daemon-down",
+          "group": "inline"
+        },
+        {
+          "command": "kaizen.stopDaemon",
+          "when": "view == kaizenFleet && viewItem == daemon-up",
+          "group": "inline"
+        },
+        {
+          "command": "kaizen.approve",
+          "when": "view == kaizenApprovals && viewItem == approval",
+          "group": "inline"
+        },
+        {
+          "command": "kaizen.deny",
+          "when": "view == kaizenApprovals && viewItem == approval",
+          "group": "inline"
+        },
+        {
+          "command": "kaizen.steer",
+          "when": "view == kaizenSessions && viewItem == session-owned"
+        },
+        {
+          "command": "kaizen.setGoal",
+          "when": "view == kaizenSessions && viewItem == session-owned"
+        },
+        {
+          "command": "kaizen.attach",
+          "when": "view == kaizenSessions && viewItem == session-readonly"
+        },
+        {
+          "command": "kaizen.unbindSession",
+          "when": "view == kaizenSessions && viewItem =~ /^session/"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Kaizen",
+      "properties": {
+        "kaizen.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Interpreter for kaizen.py reads (empty = $DEVROOT kaizen venv, then 'python')."
+        },
+        "kaizen.pollSeconds": {
+          "type": "number",
+          "default": 5,
+          "description": "View refresh interval in seconds (0 disables polling)."
+        },
+        "kaizen.chat.enterBehavior": {
+          "type": "string",
+          "enum": ["send", "newline"],
+          "default": "send",
+          "description": "Whether Enter sends or inserts a newline in the chat composer."
+        },
+        "kaizen.chat.followUpQueueMode": {
+          "type": "string",
+          "enum": ["queue", "off"],
+          "default": "queue",
+          "description": "Queue follow-up prompts while a turn is running, or disable follow-ups."
+        },
+        "kaizen.chat.autosaveBeforeTurn": {
+          "type": "boolean",
+          "default": false,
+          "description": "Save dirty files before a governed turn when later context features request it."
+        },
+        "kaizen.chat.renderMarkdown": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the safe Markdown subset for assistant and system messages."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p . && tsc -p src/webview",
+    "package": "tsc -p . && tsc -p src/webview && python build_vsix.py",
+    "test": "node ../tests/extension/run-tests.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.0"
+  }
+}

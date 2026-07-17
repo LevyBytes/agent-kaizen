@@ -52,7 +52,7 @@ The default embedder is instruction-tuned: `E4 --semantic`/`--hybrid` automatica
 
 ### Multiple embedding models, one active index
 
-Each embedding model maps text into its **own** learned vector space, so vectors from different models are not comparable — not merely because the length differs (granite is 768-dim, F2LLM 2048-dim), but because even at equal dimension the coordinate systems are unrelated: a query embedded by one model, compared against documents embedded by another, returns meaningless "nearest" matches, not slightly-worse ones. Kaizen therefore stores a **separate index per model** in the `chunk_embeddings` side table and ranks every query against a **single active model's** index, never a mix. The chunk text is the source of truth; each embedding index is a derived, rebuildable artifact over it.
+Each embedding model maps text into its **own** learned vector space, so vectors from different models are not comparable — not merely because vector lengths can differ, but because even at equal dimension the coordinate systems are unrelated: a query embedded by one model, compared against documents embedded by another, returns meaningless "nearest" matches, not slightly-worse ones. Kaizen therefore stores a **separate index per model** in the `chunk_embeddings` side table and ranks every query against a **single active model's** index, never a mix. The chunk text is the source of truth; each embedding index is a derived, rebuildable artifact over it.
 
 Because indexes coexist, upgrading the embedder is a **rolling, reversible** operation instead of a blocking re-vector:
 
@@ -104,4 +104,4 @@ python kaizen.py B6 --watch               # live-refresh view (loads nothing)
 support_scripts\model-monitor.cmd         # native GUI (system-wide GPU + Ollama panels)
 ```
 
-`support_scripts\run-backend-tests.cmd` runs a preflight, auto-launches the GUI, runs the live backend tests, then holds all four backends resident so the load is visible end-to-end.
+`tests\run-backend-tests.cmd` runs a preflight, auto-launches the GUI, runs the live backend tests, holds all four backends resident so the load is visible end-to-end, then purges any real-DB test rows through `K7`.

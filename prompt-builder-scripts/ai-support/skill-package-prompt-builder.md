@@ -44,14 +44,14 @@ python .\prompt-builder-scripts\ai-support\skill-package-prompt-builder.py gener
   --no-clipboard
 ```
 
-`generate` starts from the selected session's latest draft or run when `--session` is supplied. Without `--session`, it starts from built-in defaults. CLI flags override those defaults for that run. Generated runs are logged by default; use `--no-log` for a stateless one-off.
+`generate` starts from the selected session's latest draft or run when `--session` is supplied. Without `--session`, it starts from built-in defaults. CLI flags override those defaults for that run. Generated runs are logged by default in the sessions, session-drafts, run-history, and development-log zones described below; use `--no-log` for a stateless one-off.
 
 Common `generate` flags:
 
 - `--session`: session root or exact session name to use as defaults.
 - `--session-name`: name for a new CLI-created session.
-- `--skill-name`, `--skill-slug`, `--purpose`, `--target-agents`.
-- `--skill-category`: primary category from the 9-category skill taxonomy.
+- `--skill-name`, `--skill-slug`, `--purpose`, `--target-agents` (`Codex`, `Claude`, or `both`).
+- `--skill-category`: primary category token from the 9-category skill taxonomy: `library-api-reference`, `product-verification`, `data-fetching-analysis`, `business-process-automation`, `code-scaffolding-templates`, `code-quality-review`, `ci-cd-deployment`, `runbook`, or `infrastructure-operations`.
 - `--triggers`, `--example-tasks`, `--negative-triggers`.
 - `--workflow`, `--files`, `--doc-depth`, `--verification`.
 - `--known-gotchas`, `--quality-rubric`, `--observation-method`.
@@ -90,7 +90,7 @@ Use `--sources-file` when a source value needs semicolons or when you want a rev
 }
 ```
 
-If `--sources-file` or `--source` is supplied, that source registry replaces session/default sources for the run. If neither is supplied, `generate` uses session sources when `--session` is supplied, otherwise the built-in seed sources.
+The semicolon form's `type` and `use` keys map to the JSON form's `stype` and `intended_use` keys. If `--sources-file` or `--source` is supplied, that source registry replaces session/default sources for the run. If neither is supplied, `generate` uses session sources when `--session` is supplied, otherwise the built-in seed sources.
 
 Management commands are noninteractive:
 
@@ -118,7 +118,7 @@ The receiving agent is instructed to create:
 - `references/topics.json` as machine-readable topic metadata.
 - `references/source-map.json` when source licensing allows digest-and-attribute handling.
 - An `Inspired by` section instead of source-map metadata when licensing is restricted or unknown.
-- A stdlib verifier script under `AI/work/verify_{skill_slug}.py`.
+- A stdlib verifier script under `AI/work/verify_{skill_slug}.py`; this filename placeholder uses underscores while the skill-directory placeholder `{skill-slug}` uses hyphens.
 - A prompt archive under `user/prompts-given/`.
 - A result log under `user/prompt-results-logs/`.
 - A resumable build ledger under `AI/work/` when sources are large or multi-batch.
@@ -160,7 +160,7 @@ At startup, use:
 - Enter or `1` to start the prompt builder.
 - `r` to reprint the last completed prompt for the current session.
 - `s` to review or change settings.
-- `q` to quit cleanly.
+- `:q` to quit cleanly.
 
 Settings include:
 
@@ -183,9 +183,9 @@ The script supports named sessions so you can keep separate skill-building effor
 At most prompts:
 
 - Enter accepts the shown default.
-- `b` goes back to the previous question when that prompt supports backtracking.
-- `q` quits cleanly.
-- `m` starts multiline entry; finish with a line containing only `END`.
+- `:b` goes back to the previous question when that prompt supports backtracking.
+- `:q` quits cleanly.
+- `:m` starts multiline entry; finish with a line containing only `END`.
 
 Do not paste several raw lines into a normal one-line prompt. Use multiline mode for pasted blocks so lines do not spill into later questions.
 
@@ -194,6 +194,8 @@ Do not paste several raw lines into a normal one-line prompt. Use multiline mode
 The assist loop is optional and works by copy-paste. It does not use an API key.
 
 When enabled, the script prints an assist request. Paste that request into any LLM, paste the reply back into the script, and end the pasted reply with a line containing only `<<END>>`.
+
+The optional `json-repair` package improves parsing of imperfect pasted JSON replies; without it, the assist loop continues with standard-library parsing and rejects replies it cannot parse.
 
 The assist loop can:
 
@@ -211,7 +213,7 @@ The source registry is the most important part of the run. Register every source
 Each source has:
 
 - Label: short human-readable name.
-- Source type: `official-docs`, `local-file`, `url`, `example`, `api`, `tutorial`, or `note`.
+- Source type (`type` in `--source`, `stype` in `--sources-file`): `official-docs`, `local-file`, `url`, `example`, `api`, `tutorial`, or `note`.
 - Location: URL, repo-relative path, or local path.
 - Priority: `high`, `medium`, or `low`.
 - Trust level: `official`, `verified`, `community`, or `unverified`.
@@ -254,7 +256,7 @@ The generated prompt pushes the receiving agent to make `description` specific a
 
 ### Skill Category
 
-Choose the primary category before drafting. The script uses the same 9-category taxonomy as the `skill-drafting` skill: library/API reference, product verification, data fetching and analysis, business process automation, code scaffolding/templates, code quality/review, CI/CD and deployment, runbook, and infrastructure operations.
+Choose the primary category before drafting. The accepted `--skill-category` tokens are listed under Flag-Driven CLI; their labels are library/API reference, product verification, data fetching and analysis, business process and team automation, code scaffolding/templates, code quality/review, CI/CD and deployment, runbook, and infrastructure operations.
 
 ### Example Tasks And Negative Triggers
 

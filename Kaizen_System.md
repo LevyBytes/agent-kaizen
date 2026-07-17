@@ -30,7 +30,7 @@ Management controls durable memory and policy.
 The user controls priorities and approvals.
 ```
 
-SAVMI is a cycle. Tiny tasks can run a tiny cycle: define the goal, make the change, verify it, and record only the useful trace. Increase the amount of Scope, Adapt contracts, verification, and management records as risk, ambiguity, cost, or blast radius increases.
+SAVMI is a cycle. Tiny tasks can run a tiny cycle: define the goal, make the change, verify it, and record only the useful trace. Increase scoping, adaptation contracts, verification, and management records as risk, ambiguity, cost, or blast radius increases.
 
 Evidence authority applies across the whole system. Raw upstream evidence such as source code, specifications, official documentation, test output, logs, artifact hashes, and explicit user decisions outranks summaries, generated references, and model synthesis. Compiled references are useful operating layers, but when they conflict with evidence, return to the evidence and record the correction.
 
@@ -51,13 +51,13 @@ When Scope needs outside material - specifications, PDFs, manuals, standards, we
 
 The Iterative Spec should be improved until it is ready to adapt. For substantial work, the agent should ask enough targeted questions to remove risky ambiguity. For small work, the spec can be a few sentences, but it still needs a clear goal and a way to know whether the result worked.
 
-A concept of IRL impact and review belongs here. For major architecture, schema, migration, security, cost, workflow decisions, etc... agents can forecast likely consequences, failure modes, maintenance costs, and user friction. Those forecasts are only hypotheses and should not be used as a primary rubric for decision making. But inherently incorrect assumptions should be identified and addressed at this step before work moves forward.
+A concept of IRL impact and review belongs here. For major architecture, schema, migration, security, cost, and workflow decisions, agents can forecast likely consequences, failure modes, maintenance costs, and user friction. Those forecasts are only hypotheses and should not be used as a primary rubric for decision making. But inherently incorrect assumptions should be identified and addressed at this step before work moves forward.
 
 Decision and approval gates prevent silent drift. If new evidence changes scope, risk, cost, data shape, security posture, user-facing behavior, or acceptance criteria, pause adaptation, return to Scope, and get the decision approved before continuing.
 
 ## 3. Adapt
 
-Adapt is the change layer. It turns the approved Scope into bounded but adaptive execution. Just because our favorite Toy-R-Us stores did not adapt, does not mean you should not either. Change is inevitable, be flexible enough to facilitate adaptive approaches to fulfill your scope.
+Adapt is the change layer. It turns the approved Scope into bounded but adaptive execution. Just because our favorite Toys R Us stores did not adapt, does not mean you should not either. Change is inevitable, be flexible enough to facilitate adaptive approaches to fulfill your scope.
 
 Adapt includes:
 
@@ -73,11 +73,11 @@ The execution contract keeps agents from turning a narrow request into broad unc
 
 Capabilities need boundaries. Any tool, script, skill, agent, MCP server, or gateway should have an understandable contract for what it can read, write, call, and return; what credentials or approvals it requires; what schemas it accepts or emits; and what evidence proves it behaved correctly.
 
-Deterministic work should move into maintainable coded scripts. Agents should not spend context remembering file naming rules, formatter commands, report paths, schema transitions, or ledger mechanics when a script can do those jobs perfectly repeatable. This ends up saving a substantial amount of tokens over time and reduces inherent agentic drift.
+Deterministic work should move into maintainable coded scripts. Agents should not spend context remembering file naming rules, formatter commands, report paths, schema transitions, or ledger mechanics when a script can do those jobs with perfect repeatability. This ends up saving a substantial amount of tokens over time and reduces inherent agentic drift.
 
 A LEDGER is the durable timeline of the work. It records decisions, adapted plans, commands run, artifacts changed, verification results, failures, and handoff notes so humans and agents can resume from evidence instead of parsing what happened from a chat history. Save on context window, save on tokens.
 
-Suggestion until no longer an issue, compact your context window before major tasks.
+Until context handling improves, compact your context window before major tasks.
 
 ## 4. Verify
 
@@ -123,9 +123,9 @@ Useful status labels you could include:
 
 ## 5. Manage
 
-Manage is the durable operations layer. It is the part most agentic coding approaches I think underweight: records, policy, proof, context hygiene, data management, and retrieval.
+Manage is the durable operations layer. It is the part most agentic coding approaches underweight: records, policy, proof, context hygiene, data management, and retrieval.
 
-The data plane aspect of management helps improve efficiency for automation. The process saves what happens, stores it in a structured database, and makes it available to later cycles without requiring a full chat-history reread. Targetable, bite-sized records under one thousand characters when possible. Yay more saving tokens!
+The data plane aspect of management helps improve efficiency for automation. The process saves what happens, stores it in a structured database, and makes it available to later cycles without requiring a full chat-history reread. Keep durable records targetable and bite-sized, on the order of one thousand characters when practical. Yay more saving tokens!
 
 Rely on ledgers and validated reports instead of chat memory, pass distilled packets between agents, and avoid forcing the main context window to carry raw transcripts, long logs, or every intermediate observation.
 
@@ -188,7 +188,7 @@ Improve does not bypass Scope and Adapt. It feeds the next cycle with better pri
 
 ## 7. Skills And Capabilities
 
-Skills and support scripts are cross-layer capabilities. They can help Scope research, Adaptive execution, Verify, review, Manage records, and Improve learning.
+Skills and support scripts are cross-layer capabilities. They can support research during Scope, execution during Adapt, checks and review during Verify, records during Manage, and learning during Improve.
 
 A skill should not be a horde of clowns filling your model context window car. It is a small trigger surface plus optional references, scripts, fixtures, and verification behavior that loads only when relevant or preferably only on demand.
 
@@ -270,7 +270,7 @@ High-recall review mode is useful for substantial work. Missing an important str
 
 Agent contracts have a density standard: plans, task specs, subagent and handoff instructions, durable records, and generated reports must be terse, technical, and signal-dense — no colloquialisms, filler, or restatement, maximizing signal per token. Human-authored documentation and commit messages keep a human voice and are out of scope. The standard is deterministically checkable (a filler and hedge wordlist, qualifier density, and near-duplicate-sentence detection), so its verdict can gate; see the contract-bloat anti-pattern in the next section.
 
-Model freshness is a standard. Default model repos — text generation, reranker, PII, and embedder — must be current best-in-class and reviewed on a cadence, never a stale default. Using an outdated or under-performant model when a better one exists contradicts the continual improvement ethos. This standard is invoked when the framework is updated or on user inquiry, not on every agent turn. Model VRAM budget should remain adaptive to each system according to user preferences, but for public facing initial adoption the defaults models are sized to a 12 GB VRAM budget.
+Model freshness is a standard. Default model repos — text generation, reranker, PII, and embedder — must be current best-in-class and reviewed on a cadence, never a stale default. Using an outdated or under-performant model when a better one exists contradicts the continual improvement ethos. This standard is invoked when the framework is updated or on user inquiry, not on every agent turn. Model VRAM budget should remain adaptive to each system according to user preferences, but for public facing initial adoption the default models are sized to a 12 GB VRAM budget.
 
 Research on utilization or retirement of model implementation methods for this framework should be done against a fixed source allowlist of peer reviewed research papers available from platforms such as: arXiv, OpenReview, JMLR, Nature Machine Intelligence, JAIR, HuggingFace, GitHub, official Anthropic and OpenAI reports, and ACL Anthology; and all model implementation methods for the framework should be validated against available workflows and available datasets before trusted for wide adoption.
 
@@ -308,7 +308,7 @@ The system concept is backend-agnostic. A project can use a different database, 
 
 Agentgateway or similar routing gateways should be used at large scales for: centralized identity, RBAC, remote tool federation, model routing, budgets, rate limits, failover, and auditable traces across multiple agents, users, services, or machines.
 
-A local generative-backend seam belongs to this same layer: routing cheap or private sub-tasks to a local model, with budgets and routing events recorded like any other managed data. It is best designed as its own increment. A local or cheaper model can help with triage, summarization, or first-pass drafting, but it is never the final acceptance authority unless a deterministic verifier backs the decision. The first such backend has shipped: a ComfyUI workflow runner records each generative run with a graph hash, the stored workflow, the seed, and output hashes, so the asset is reproducible and replayable. It is optional and capability-activated — the agent authors the workflow, and an unreachable server fails gracefully rather than blocking the task. A second backend has joined it: an optional OpenAI-compatible model seam (a local Ollama server by default, any remote endpoint by configuration, or an in-process sentence-transformers backend with no server at all) that supplies embeddings — turning evidence-chunk storage and vector search live over Turso-native vectors — and advisory text generation. It is opt-in (configured by environment), API keys stay in the environment and are never stored, and with nothing configured the harness stays on its deterministic, lexical baseline.
+A local generative-backend seam belongs to this same layer: routing cheap or private sub-tasks to a local model, with budgets and routing events recorded like any other managed data. It is best designed as its own increment. A local or cheaper model can help with triage, summarization, or first-pass drafting, but it is never the final acceptance authority unless a deterministic verifier backs the decision. The first such backend has shipped: a ComfyUI workflow runner records each generative run with a graph hash, the stored workflow, the seed, and output hashes, so the asset is reproducible and replayable. It is optional and capability-activated — the agent authors the workflow, and an unreachable server fails gracefully rather than blocking the task. A second backend has joined it: an optional OpenAI-compatible model seam with a local Ollama server by default, any remote endpoint by configuration, or an in-process sentence-transformers backend with no server. Depending on the selected backend, the seam supplies embeddings for evidence-chunk storage and vector search over Turso-native vectors and advisory text generation. It is opt-in (configured by environment), API keys stay in the environment and are never stored, and with nothing configured the harness stays on its deterministic, lexical baseline.
 
 The Kaizen System performs best when every cycle starts with better context, fewer repeated mistakes, and stronger evidence than the last one.
 

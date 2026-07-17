@@ -22,6 +22,7 @@ from .text_search import like_pattern
 
 
 def _payload_from_args(args: Any) -> dict[str, Any]:
+    """Private; parses --payload-json / --payload-json-file (file wins), returns {} for empty, denies non-object with DENIED_PAYLOAD_TYPE (exit 2)."""
     raw = getattr(args, "payload_json", None)
     if getattr(args, "payload_json_file", None):
         raw = read_text_file(args.payload_json_file)
@@ -36,9 +37,10 @@ def _payload_from_args(args: Any) -> dict[str, Any]:
 
 
 def add_trace_event(args: Any) -> dict[str, Any]:
+    """T1 add path: merges flag defaults into payload, validates trace_event, runs the redaction gate over free-text fields, inserts one trace_events row; returns {status,id,content_hash}."""
     payload = _payload_from_args(args)
     if getattr(args, "kind", None):
-        payload.setdefault("kind", args.kind)
+        payload["kind"] = args.kind
     if getattr(args, "task_id", None):
         payload.setdefault("task_id", args.task_id)
     summary = _text_arg(args, "summary", payload.get("summary", ""))
@@ -128,7 +130,6 @@ def record_model_call(
     task_id: str | None = None,
     trace_id: str | None = None,
     is_test: int = 0,
-    summary: str | None = None,
 ) -> str | None:
     """Best-effort observability trace for a model USE that B2/B4 do not already record -- the
     embedder, reranker, and PII lanes. Writes ``kind='model_call'`` with ``name=<lane>`` so the B6
@@ -141,14 +142,13 @@ def record_model_call(
     if lane not in _MODEL_CALL_LANES:
         return None
     latency_ms = int(latency_ms)
-    if summary is None:
-        parts = [lane]
-        if count is not None:
-            parts.append(f"{count} item{'' if count == 1 else 's'}")
-        if dimension is not None:
-            parts.append(f"dim {dimension}")
-        parts.append(f"{latency_ms}ms")
-        summary = "model use: " + ", ".join(parts)
+    parts = [lane]
+    if count is not None:
+        parts.append(f"{count} item{'' if count == 1 else 's'}")
+    if dimension is not None:
+        parts.append(f"dim {dimension}")
+    parts.append(f"{latency_ms}ms")
+    summary = "model use: " + ", ".join(parts)
     payload = {
         "kind": "model_call",
         "name": lane,
@@ -159,12 +159,14 @@ def record_model_call(
         "status": "recorded",
         "summary": summary,
     }
-    try:
-        validate_record("trace_event", {k: v for k, v in payload.items() if v is not None})
-        record_id = new_id("te")
-        created = now()
-        content_hash = utc_text_hash({"id": record_id, **{k: v for k, v in payload.items() if v is not None}})
+    clean_payload = {key: value for key, value in payload.items() if value is not None}
+    assert_redacted({"summary": summary})
+    validate_record("trace_event", clean_payload)
+    record_id = new_id("te")
+    created = now()
+    content_hash = utc_text_hash({"id": record_id, **payload})
 
+    try:
         def op(conn: Any, _attempt: int) -> None:
             conn.execute(
                 "INSERT INTO trace_events "
@@ -184,6 +186,7 @@ def record_model_call(
 
 
 def add_eval_score(args: Any) -> dict[str, Any]:
+    """T3 CLI wrapper: parses payload from args, delegates to write_eval_score; --test marks the row removable (is_test=1)."""
     return write_eval_score(_payload_from_args(args), is_test=1 if getattr(args, "test", False) else 0)
 
 
@@ -212,7 +215,18 @@ def write_eval_score(payload: dict[str, Any], *, is_test: int = 0) -> dict[str, 
                 exit_code=2,
             )
     elif data_type == "boolean":
-        truthy = value in (True, 1, "true", "True", "yes")
+        if isinstance(value, bool):
+            truthy = value
+        elif isinstance(value, int) and not isinstance(value, bool) and value in (0, 1):
+            truthy = bool(value)
+        elif isinstance(value, str) and value.strip().lower() in {"true", "false", "yes", "no", "1", "0", "on", "off"}:
+            truthy = value.strip().lower() in {"true", "yes", "1", "on"}
+        else:
+            raise KaizenDenied(
+                "DENIED_SCORE_VALUE",
+                {"required_action": "a boolean score requires true|false, yes|no, on|off, or 1|0"},
+                exit_code=2,
+            )
         value_num = 1.0 if truthy else 0.0
         value_label = str(value)
     else:
@@ -281,13 +295,21 @@ def query_eval_scores(args: Any) -> dict[str, Any]:
         conditions.append("name LIKE ? ESCAPE '\\'")
         params.append(like_pattern(query))
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.append(int(getattr(args, "limit", None) or 50))
+    raw_limit = getattr(args, "limit", None)
+    limit = int(50 if raw_limit is None else raw_limit)
+    if limit < 0:
+        raise KaizenDenied(
+            "DENIED_LIMIT_INVALID",
+            {"limit": limit, "required_action": "limit must be zero or greater"},
+            exit_code=2,
+        )
+    params.append(limit)
     rows = fetch_all(
         "SELECT id, created_at, trace_event_id, eval_run_id, verification_id, name, value_num, value_label, "
         f"data_type, source, comment FROM eval_scores{where} ORDER BY created_at DESC LIMIT ?",
         tuple(params),
     )
-    numeric = [float(r[6]) for r in rows if r[6] is not None]
+    numeric = [float(r[6]) for r in rows if r[6] is not None and r[8] == "numeric"]
     aggregates: dict[str, Any] = {"count": len(rows), "numeric_count": len(numeric)}
     if numeric:
         aggregates.update(
@@ -320,6 +342,7 @@ def query_eval_scores(args: Any) -> dict[str, Any]:
 
 
 def trace_report(args: Any) -> dict[str, Any]:
+    """Renders a per-task/-trace markdown report to EXPORT_ROOT/reports, returns totals + repo-relative path + sha256; requires --task-id or --trace-id else DENIED_ID_REQUIRED. Caveat: key is unsanitized (F1 traversal)."""
     task_id = getattr(args, "task_id", None)
     trace_id = getattr(args, "trace_id", None)
     if task_id:
@@ -333,15 +356,16 @@ def trace_report(args: Any) -> dict[str, Any]:
             exit_code=2,
         )
     rows = fetch_all(
-        f"SELECT id, created_at, kind, level, status, model, prompt_tokens, completion_tokens, total_tokens, "
-        f"cost, latency_ms, summary FROM trace_events WHERE {column} = ? ORDER BY created_at",
+        f"SELECT id, created_at, kind, level, status, model, total_tokens, cost, summary "
+        f"FROM trace_events WHERE {column} = ? ORDER BY created_at",
         (key,),
     )
-    total_tokens = sum(int(r[8] or 0) for r in rows)
-    total_cost = sum(float(r[9] or 0) for r in rows)
+    total_tokens = sum(int(r[6] or 0) for r in rows)
+    total_cost = sum(float(r[7] or 0) for r in rows)
     out_dir = EXPORT_ROOT / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"trace-{key}.md"
+    safe_key = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(key))[:80] or "trace"
+    path = out_dir / f"trace-{safe_key}-{utc_text_hash(str(key))[:12]}.md"
     lines = [
         f"# Trace report {key}",
         "",
@@ -353,7 +377,7 @@ def trace_report(args: Any) -> dict[str, Any]:
     for r in rows:
         lines.append(
             f"- `{r[0]}` {r[1]} [{r[2]}:{r[3]}:{r[4]}] {r[5] or ''} "
-            f"tok={r[8] or 0} cost={r[9] or 0} {r[11]}"
+            f"tok={r[6] or 0} cost={r[7] or 0} {r[8]}"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {

@@ -14,22 +14,41 @@ from typing import Any
 from .db import new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import utc_text_hash
-from .redaction import scan_for_secrets
+from .redaction import assert_redacted, scan_for_secrets
 from .schemas import validate_record
 from .task_records import _text_arg
 
 
+def _stable_text(path: Any) -> str:
+    """Read one UTF-8 file through the handle-anchored authority, rejecting swaps and oversize files."""
+    from .orchestration.workspace_path_authority import MAX_AUTHORITY_BYTES, WorkspacePathAuthority, WorkspacePathError
+
+    try:
+        with WorkspacePathAuthority(path.parent) as authority:
+            return authority.read(path.name, MAX_AUTHORITY_BYTES).data.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise KaizenDenied("DENIED_FILE_NOT_UTF8", {"required_action": "re-encode the file as UTF-8"}, exit_code=2) from error
+    except WorkspacePathError as error:
+        raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"required_action": "pass a stable regular file"}, exit_code=1) from error
+
+
 def advisory_pii_scan(
-    text: str, *, record_trace: bool = False, task_id: str | None = None, is_test: int = 0
+    text: str,
+    *,
+    record_trace: bool = False,
+    task_id: str | None = None,
+    is_test: int = 0,
+    backend: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Optional model-NER hits as ``[{source:'model', label, span_hash}]``; [] when no PII backend.
 
     ``record_trace=True`` writes one best-effort ``model_call`` observability trace (lane ``pii``) so
-    the GLiNER model use shows in the B6 monitor -- B2/B4/B5 all route their PII scan through here.
+    the GLiNER model use shows in the B6 monitor. ``task_id`` and ``is_test`` affect only that optional
+    trace; neither changes returned hits. B2/B4/B5 all route their PII scan through here.
     """
     from .backends import get_pii_backend
 
-    backend = get_pii_backend()
+    backend = backend if backend is not None else get_pii_backend()
     if backend is None:
         return []
     import time
@@ -51,7 +70,9 @@ def advisory_pii_scan(
     hits: list[dict[str, Any]] = []
     for hit in raw_hits:
         start, end = hit.get("start"), hit.get("end")
-        span = text[start:end] if isinstance(start, int) and isinstance(end, int) else ""
+        if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start <= end <= len(text):
+            continue
+        span = text[start:end]
         hits.append({"source": "model", "label": hit.get("label", "pii"), "span_hash": utc_text_hash({"s": span})})
     return hits
 
@@ -66,17 +87,17 @@ def pii_scan(args: Any) -> dict[str, Any]:
     Writes a durable pii_scan record (hashed spans only). ADVISORY ONLY -- never gates a write."""
     text = getattr(args, "prompt", None)
     source_ref = "prompt"
-    if not text and getattr(args, "body", None):
+    if text is None and getattr(args, "body", None) is not None:
         text, source_ref = args.body, "body"
-    if not text and getattr(args, "path", None):
-        from .paths import read_text_file, resolve_user_path
+    if text is None and getattr(args, "path", None):
+        from .paths import resolve_user_path
 
         allow_external = bool(getattr(args, "allow_external", False))
         path = resolve_user_path(
             args.path, require_file=True, repo_only=not allow_external, allow_external_hint=not allow_external
         )
-        text, source_ref = read_text_file(path), "path"
-    if not text:
+        text, source_ref = _stable_text(path), "path"
+    if text is None:
         raise KaizenDenied(
             "DENIED_PII_TEXT_REQUIRED",
             {"required_action": "pass --prompt, --body, or --path (the text to scan)"},
@@ -84,16 +105,14 @@ def pii_scan(args: Any) -> dict[str, Any]:
         )
 
     regex_hits = _regex_hits(text)
-    model_hits = advisory_pii_scan(
-        text,
-        record_trace=True,
-        task_id=getattr(args, "task_id", None),
-        is_test=1 if getattr(args, "test", False) else 0,
-    )
-    hits = regex_hits + model_hits
     from .backends import get_pii_backend
 
     backend = get_pii_backend()
+    is_test = 1 if getattr(args, "test", False) else 0
+    model_hits = advisory_pii_scan(
+        text, record_trace=True, task_id=getattr(args, "task_id", None), is_test=is_test, backend=backend,
+    ) if backend is not None else []
+    hits = regex_hits + model_hits
     summary = _text_arg(
         args, "summary", f"Advisory PII scan: {len(regex_hits)} regex, {len(model_hits)} model hit(s)."
     )
@@ -108,13 +127,12 @@ def pii_scan(args: Any) -> dict[str, Any]:
         "provider": backend.name if backend else None,
         "summary": summary,
     }
+    assert_redacted({"summary": summary})
     validate_record("pii_scan", {k: v for k, v in payload.items() if v is not None})
 
     record_id = new_id("pii")
     created = now()
     content_hash = utc_text_hash({"id": record_id, **{k: v for k, v in payload.items() if v is not None}})
-
-    is_test = 1 if getattr(args, "test", False) else 0
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(

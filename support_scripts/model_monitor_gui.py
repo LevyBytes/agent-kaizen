@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """Agent Kaizen backend monitor -- native desktop window (PySide6).
 
-1-click via ``model-monitor.cmd`` (pythonw, no console). A live window over the model-capability
-backends: a GPU header (temp / fan / util / VRAM bar / power), one card per lane
-(embed / text / rerank / pii) colour-coded by state, an Ollama-loaded panel, and a recent-activity
-feed. It reuses the B6 data layer (``kaizen_components.model_monitor.collect`` + ``_lane_state``), so
-the window and ``python kaizen.py B6`` can never diverge.
+1-click via ``model-monitor.cmd`` (pythonw, no console). The live window provides a GPU header
+(temp / fan / util / VRAM bar / power), a "Models running now" panel, and a "Recent Kaizen model
+calls" feed. It reuses the B6 data layer (``kaizen_components.model_monitor.collect``), so the
+window and ``python kaizen.py B6`` share one observation path.
 
-Read-only + thermal-safe by construction: the poll loop runs ``collect()`` only -- nvidia-smi + Ollama
-``/api/ps`` + a torch-free config reflection + a DB read, NEVER model inference. The "Probe devices"
-button is the sole path that loads weights (opt-in, one-shot, run off the UI thread).
+Automatic polling is read-only and never runs inference: it uses nvidia-smi, Ollama ``/api/ps``,
+a torch-free config reflection, and a DB read. The explicit emergency-stop action can unload models
+and terminate the displayed GPU processes after user confirmation.
 
 Run:
     pythonw model_monitor_gui.py             # the window (what model-monitor.cmd launches)
     python  model_monitor_gui.py --once      # one JSON snapshot, no Qt (headless self-test)
-    python  model_monitor_gui.py --smoke     # build offscreen, redraw, exit 0 (Qt gate, no display)
     python  model_monitor_gui.py --interval 2.0 --limit 8
 """
 
@@ -22,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -45,19 +42,22 @@ class Source:
         self.limit = limit
 
     def snapshot(self) -> dict:
-        return collect(SimpleNamespace(limit=self.limit, probe=False, json=True, watch=False))
+        """Return one read-only B6 snapshot without probing model devices."""
+        return collect(SimpleNamespace(limit=self.limit, probe=False))
 
 
 # --------------------------------------------------------------------------------- headless paths
 
 def _run_once(source: Source) -> int:
+    """Print one indented JSON snapshot and return success for headless verification."""
     print(json.dumps(source.snapshot(), indent=2, ensure_ascii=False))
     return 0
 
 
 # --------------------------------------------------------------------------------------- Qt window
 
-def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
+def _build_gui(source: Source, interval_ms: int):
+    """Lazily build/start the PySide6 poller and return its application and window."""
     from PySide6.QtCore import QThread, Signal
     from PySide6.QtGui import QColor, QFont, QPalette
     from PySide6.QtWidgets import (
@@ -91,8 +91,9 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
                     self.fail.emit(f"{type(exc).__name__}: {exc}")
                 slept = 0
                 while self._run and slept < self.every_ms:
-                    self.msleep(100)
-                    slept += 100
+                    step = min(100, self.every_ms - slept)
+                    self.msleep(step)
+                    slept += step
 
         def halt(self) -> None:
             self._run = False
@@ -160,8 +161,10 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
                 "background:#4a1414;color:#ff6b6b;font-weight:bold;padding:5px 12px;"
                 "border:1px solid #f85149;border-radius:6px;"
             )
-            self.stop_btn.setToolTip("Immediately unload every Ollama-resident model and terminate the GPU "
-                                     "AI processes (python / torch / comfy / llama-server). Frees VRAM now.")
+            self.stop_btn.setToolTip(
+                "Immediately unload every Ollama-resident model and terminate the GPU "
+                "AI processes (python / torch / comfy / llama-server). Frees VRAM now."
+            )
             self.stop_btn.clicked.connect(self._on_emergency_click)
             foot.addWidget(self.stop_btn)
             foot.addStretch(1)
@@ -206,6 +209,8 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
         def closeEvent(self, event) -> None:  # noqa: N802 -- Qt override
             self.poller.halt()
             self.poller.wait(1500)
+            if self._stop_worker is not None and self._stop_worker.isRunning():
+                self._stop_worker.wait()
             super().closeEvent(event)
 
         def _on_emergency_click(self) -> None:
@@ -256,12 +261,13 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
         def _on_snap(self, snap: dict) -> None:
             self.fail_lbl.hide()
             gpu = snap.get("gpu", {})
-            if not gpu.get("available"):
+            devices = gpu.get("devices") or []
+            if not gpu.get("available") or not devices:
                 self.gpu_lbl.setText(f"GPU: nvidia-smi unavailable ({gpu.get('reason', 'not found')})")
                 self.vram.setValue(0)
                 self.vram.setFormat("no GPU")
             else:
-                dev = gpu["devices"][0]
+                dev = devices[0]
                 self.gpu_lbl.setText(
                     f"GPU{dev.get('index', 0)} {dev.get('name', '?')}   "
                     f"{_u(dev.get('temp_c'), 'C')}   fan {_u(dev.get('fan_pct'), '%')}   "
@@ -275,7 +281,6 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
 
             ol = snap.get("ollama", {})
             loaded = ol.get("loaded", []) if ol.get("reachable") else []
-            loaded_names = {m.get("model") for m in loaded if m.get("model")}
 
             # "Models running now": GPU AI processes (any project, with real per-process VRAM/util from
             # Windows perf counters) + Ollama-resident models.
@@ -330,10 +335,12 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
                 ) or "(none recorded)"
                 self.recent.setPlainText(recent_text)  # only rewrite on genuinely new activity (no flicker)
 
-            self.status_lbl.setText(f"auto-refresh {self._interval_s:g}s  -  updated {datetime.now().strftime('%H:%M:%S')}")
+            updated = datetime.now().strftime("%H:%M:%S")
+            self.status_lbl.setText(f"auto-refresh {self._interval_s:g}s  -  updated {updated}")
             self.writes += 1
 
     def _u(value, unit: str) -> str:
+        """Format a value and unit, using a question mark when the value is absent."""
         return f"{value}{unit}" if value is not None else f"?{unit}"
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -354,92 +361,13 @@ def _run_gui(source: Source, interval_ms: int, smoke: bool = False) -> int:
 
     win = MainWindow(source, interval_ms)
     win.show()
-    if smoke:
-        return _smoke_gate(app, win)
-    app.exec()
-    return 0
-
-
-def _smoke_gate(app, win) -> int:
-    """Headless gate (offscreen): halt the live poller, drive the UI with two synthetic snapshots,
-    and assert the cards render + a real change writes. No display, no GPU, no network."""
-    win.poller.halt()
-    win.poller.wait(1500)
-    for _ in range(3):
-        app.processEvents()
-    try:
-        win.poller.snap.disconnect()
-        win.poller.fail.disconnect()
-    except Exception:
-        pass
-
-    def snap(temp, used, running):
-        return {
-            "gpu": {"available": True, "devices": [{"index": 0, "name": "RTX 5080", "temp_c": temp,
-                     "fan_pct": 0, "util_pct": 5, "mem_used_mb": used, "mem_total_mb": 16303,
-                     "power_w": 30, "power_limit_w": 360}]},
-            "gpu_processes": {"available": True, "procs": ([
-                {"pid": 36832, "name": "llama-server.exe", "vram_mb": None,
-                 "gpu_mem_mb": 1603.6, "gpu_util_pct": 4.2, "kind": "ollama"},
-                {"pid": 44100, "name": "python.exe", "vram_mb": None,
-                 "gpu_mem_mb": 940.0, "gpu_util_pct": 61.0, "kind": "torch/python"},
-            ] if running else [])},
-            "ollama": {"reachable": True, "endpoint": "http://127.0.0.1:11434",
-                       "loaded": ([{"model": "Qwen3.5-9B:Q4_K_M", "size_vram_mb": 1200,
-                                    "keep_alive": "3m41s"}] if running else [])},
-            "backends": [{"lane": "embed", "configured": False},
-                         {"lane": "text", "configured": False},
-                         {"lane": "rerank", "configured": False},
-                         {"lane": "pii", "configured": False}],
-            "recent": [
-                {"created_at": "2026-07-06T17:36:10Z", "kind": "judge", "lane": "judge",
-                 "model": "Qwen3.5-9B", "latency_ms": 840},
-                {"created_at": "2026-07-06T17:36:09Z", "kind": "model_call", "lane": "embedding",
-                 "model": "F2LLM-v2-1.7B", "latency_ms": 42},
-                {"created_at": "2026-07-06T17:36:08Z", "kind": "model_call", "lane": "rerank",
-                 "model": "ettin-reranker-150m", "latency_ms": 31},
-                {"created_at": "2026-07-06T17:36:07Z", "kind": "model_call", "lane": "pii",
-                 "model": "gliner2-pii", "latency_ms": 55},
-            ],
-        }
-
-    def pump(n=4):
-        for _ in range(n):
-            app.processEvents()
-
-    win._on_snap(snap(40, 1300, running=False)); pump()
-    assert "nothing running" in win.running.toPlainText(), "empty GPU should read 'nothing running'"
-    base = win.writes
-    win._on_snap(snap(41, 2800, running=True)); pump()   # a torch + ollama process now on the GPU
-    text = win.running.toPlainText()
-    assert "llama-server.exe" in text and "python.exe" in text, "GPU AI processes must list"
-    assert "1603.6 MB" in text and "61.0%" in text, "per-process VRAM + util must render"
-    assert "Qwen3.5-9B" in text, "resident Ollama model must list"
-    assert win.writes > base, "a real change must write"
-    # The feed shows ALL model usage by lane, not just judge/text-gen.
-    recent_text = win.recent.toPlainText()
-    for lane in ("judge", "embedding", "rerank", "pii"):
-        assert lane in recent_text, f"the {lane} lane must show in the recent feed"
-    # Recent-activity is an ACCUMULATING log: a later poll returning an empty feed (an is_test/K7
-    # purge mid test-run) must NOT wipe what was already observed -- this is the "resets too often" fix.
-    assert "Qwen3.5-9B" in win.recent.toPlainText(), "observed model call must show in the recent feed"
-    purged = snap(42, 2800, running=True); purged["recent"] = []
-    win._on_snap(purged); pump()
-    assert "Qwen3.5-9B" in win.recent.toPlainText(), "recent feed must survive a purge (no reset)"
-    win._on_fail("DatabaseError: database is locked"); pump()
-    assert win.fail_lbl.isVisible(), "a read failure must surface in the header"
-    # font scaling: wider window -> larger point size, clamped to the readable floor/ceiling.
-    assert win._pt_for_width(win._MIN_W) == win._MIN_PT, "min width -> floor point size"
-    assert win._pt_for_width(99999) == win._MAX_PT, "huge width -> ceiling point size"
-    assert win._pt_for_width(0) == win._MIN_PT, "never below the readable floor"
-    print("smoke: OK (per-process mem/util, ollama, accumulating recent-feed, font-scale, fail-surfacing)")
-    return 0
+    return app, win
 
 
 def main(argv=None) -> int:
+    """Parse arguments and run one headless snapshot or the native Qt event loop."""
     ap = argparse.ArgumentParser(description="Agent Kaizen backend monitor (PySide6 native window)")
     ap.add_argument("--once", action="store_true", help="print one JSON snapshot and exit (no Qt)")
-    ap.add_argument("--smoke", action="store_true", help="build the window offscreen and exit (Qt gate)")
     ap.add_argument("--interval", type=float, default=2.0, help="poll seconds (default 2.0, min 0.5)")
     ap.add_argument("--limit", type=int, default=8, help="recent-activity rows (default 8)")
     args = ap.parse_args(argv)
@@ -447,10 +375,9 @@ def main(argv=None) -> int:
     source = Source(limit=max(1, args.limit))
     if args.once:
         return _run_once(source)
-    if args.smoke:
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # no display needed
     interval_ms = int(max(0.5, args.interval) * 1000)
-    return _run_gui(source, interval_ms, smoke=args.smoke)
+    app, _window = _build_gui(source, interval_ms)
+    return app.exec()
 
 
 if __name__ == "__main__":

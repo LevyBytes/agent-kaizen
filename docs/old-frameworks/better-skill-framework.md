@@ -47,8 +47,7 @@ Two production modes feed the middle layer:
 
 ## Part 2 — The gold-standard package
 
-Every skill conforms to this layout. The validator
-(`skill-drafting/scripts/validate_skill_package.py`) enforces it.
+Every skill conforms to this layout. The historical validator (`skill-drafting/scripts/validate_skill_package.py`) enforced it; the current equivalent is `skill-drafting/scripts/skill_builder.py validate`.
 
 ### 2.1 Flat skill
 
@@ -58,7 +57,7 @@ Every skill conforms to this layout. The validator
 ├── GOTCHA.md           ← sibling: recurring failure modes + what to do instead
 └── references/
     ├── INDEX.md        ← human catalog of every file, grouped by section
-    ├── topics.json     ← machine-readable routing (array shape, below)
+    ├── topics.json     ← machine-readable routing (object with a topics array, below)
     └── <topic>.md …    ← one focused subject per file, ≤ ~24 KB
 ```
 
@@ -89,7 +88,7 @@ Every skill conforms to this layout. The validator
 A sibling file of recurring failure modes and what to do instead — version skew, exact-identifier
 discipline, format caveats, where to grep. Read alongside `SKILL.md`.
 
-### 2.5 `references/topics.json` (array shape)
+### 2.5 `references/topics.json` (object with a `topics` array)
 
 ```json
 {
@@ -175,7 +174,7 @@ These are `skill_builder.py` subcommands (the validator is a separate script):
   overrides the validator path) — no mirror is assumed.
 - **`split`** — splits any oversize reference file in place at heading boundaries.
 - **`validate_skill_package.py`** — the quality gate (a separate script): `name` == folder,
-  trigger-rich description, required sections, sibling `GOTCHA.md`, array-shape `topics.json`, file
+  trigger-rich description, required sections, sibling `GOTCHA.md`, object-shaped `topics.json` with a `topics` array, file
   references resolve. Routers validate with `--package`.
 
 ### 3.4 Example (verbatim build)

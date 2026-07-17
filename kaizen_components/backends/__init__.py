@@ -11,6 +11,7 @@ OpenAI-compatible endpoint; API keys come from env only and are never stored. Py
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import urllib.parse
 from typing import Any, Optional, Protocol, runtime_checkable
@@ -21,16 +22,41 @@ from ..denials import KaizenDenied
 _DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
 
 
-def _assert_endpoint_transport_safe(url: str, env_var: str) -> None:
+def _env_text(name: str) -> str | None:
+    """Return a stripped, non-empty environment value."""
+    value = os.environ.get(name)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _assert_endpoint_transport_safe(url: str, env_var: str, *, tailnet_probe=None) -> None:
     """Deny plain HTTP to a non-loopback endpoint: the bearer key would cross the
     network in cleartext. Loopback stays HTTP (the local-Ollama default); remote
-    endpoints need https. KAIZEN_ALLOW_INSECURE_HTTP=1 opts a trusted LAN back in."""
+    endpoints need https. KAIZEN_ALLOW_INSECURE_HTTP=1 opts a trusted LAN back in.
+
+    v8 M13 (plan §C.1): plain HTTP to a host ending in the configured tailnet suffix
+    (``KAIZEN_TAILNET_SUFFIX``, default ``.ts.net``) is ALSO allowed WHILE ``on_tailnet()`` is
+    True -- WireGuard end-to-end encryption covers that hop, exactly like the git-mirror transport
+    gate. ``tailnet_probe`` is injectable for tests; None ⇒ ``fleet.net.on_tailnet`` is imported
+    LAZILY inside the branch, so the no-fleet / loopback / https paths never load the fleet package."""
     if os.environ.get("KAIZEN_ALLOW_INSECURE_HTTP") == "1":
         return
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme == "https" or host in ("127.0.0.1", "localhost", "::1"):
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    if parsed.scheme == "https" or loopback:
         return
+    if parsed.scheme == "http" and host:
+        suffix = (os.environ.get("KAIZEN_TAILNET_SUFFIX") or ".ts.net").strip().lower()
+        suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        if host.endswith(suffix):
+            probe = tailnet_probe
+            if probe is None:
+                from ..fleet.net import on_tailnet as probe  # lazy: off-tailnet paths never load fleet
+            if probe():
+                return
     raise KaizenDenied(
         "DENIED_ENDPOINT_INSECURE",
         {
@@ -47,6 +73,7 @@ def _assert_endpoint_transport_safe(url: str, env_var: str) -> None:
 
 @runtime_checkable
 class EmbeddingBackend(Protocol):
+    """Embedder contract with stable name/model attributes and a capability probe mapping."""
     name: str
     model: str
 
@@ -59,6 +86,7 @@ class EmbeddingBackend(Protocol):
 
 @runtime_checkable
 class TextBackend(Protocol):
+    """Advisory text contract with stable name/model attributes and a capability probe mapping."""
     name: str
     model: str
 
@@ -69,6 +97,7 @@ class TextBackend(Protocol):
 
 @runtime_checkable
 class RerankBackend(Protocol):
+    """Reranker contract with stable name/model attributes and a capability probe mapping."""
     name: str
     model: str
 
@@ -79,6 +108,7 @@ class RerankBackend(Protocol):
 
 @runtime_checkable
 class PiiBackend(Protocol):
+    """Advisory PII scanner contract with stable name/model attributes and a capability probe mapping."""
     name: str
     model: str
 
@@ -98,9 +128,9 @@ def get_embedding_backend() -> Optional[EmbeddingBackend]:
     if selector in ("sentence-transformers", "sentence_transformers", "st"):
         from .sentence_transformers_backend import SentenceTransformersBackend
 
-        return SentenceTransformersBackend(model=os.environ.get("KAIZEN_EMBED_MODEL") or None)
+        return SentenceTransformersBackend(model=_env_text("KAIZEN_EMBED_MODEL"))
 
-    model = os.environ.get("KAIZEN_EMBED_MODEL")
+    model = _env_text("KAIZEN_EMBED_MODEL")
     if not model:
         return None
     from .ollama import OllamaEmbeddingBackend
@@ -160,6 +190,12 @@ def embed_batched(
     """
     import time
 
+    if isinstance(batch_size, bool) or batch_size <= 0:
+        raise KaizenDenied(
+            "DENIED_EMBED_BATCH_SIZE",
+            {"batch_size": batch_size, "required_action": "batch_size must be a positive integer"},
+            exit_code=2,
+        )
     started = time.monotonic()
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
@@ -186,7 +222,7 @@ def embed_batched(
             provider=getattr(backend, "name", None),
             latency_ms=int((time.monotonic() - started) * 1000),
             count=len(texts),
-            dimension=(len(vectors[0]) if vectors and vectors[0] else None),
+            dimension=next((len(vector) for vector in vectors if vector), None),
             task_id=task_id,
             is_test=is_test,
         )
@@ -207,9 +243,9 @@ def get_text_backend() -> Optional[TextBackend]:
     if selector in ("transformers", "hf", "huggingface"):
         from .transformers_backend import TransformersTextBackend
 
-        return TransformersTextBackend(model=os.environ.get("KAIZEN_LLM_MODEL") or None)
+        return TransformersTextBackend(model=_env_text("KAIZEN_LLM_MODEL"))
 
-    model = os.environ.get("KAIZEN_LLM_MODEL")
+    model = _env_text("KAIZEN_LLM_MODEL")
     if not model:
         return None
     from .ollama import OllamaTextBackend
@@ -234,7 +270,7 @@ def get_rerank_backend() -> Optional[RerankBackend]:
     if selector in ("sentence-transformers", "sentence_transformers", "st"):
         from .cross_encoder_backend import CrossEncoderRerankBackend
 
-        return CrossEncoderRerankBackend(model=os.environ.get("KAIZEN_RERANK_MODEL") or None)
+        return CrossEncoderRerankBackend(model=_env_text("KAIZEN_RERANK_MODEL"))
     return None
 
 
@@ -246,7 +282,7 @@ def get_pii_backend() -> Optional[PiiBackend]:
     ADVISORY: it augments, never replaces, the regex.
     """
     selector = os.environ.get("KAIZEN_PII_BACKEND", "").strip().lower()
-    model = os.environ.get("KAIZEN_PII_MODEL")
+    model = _env_text("KAIZEN_PII_MODEL")
     if not selector and not model:
         return None
     from .gliner_pii_backend import Gliner2PiiBackend
@@ -266,11 +302,14 @@ def describe_backends() -> list[dict[str, Any]]:
     lanes: list[dict[str, Any]] = []
 
     def off(lane: str) -> dict[str, Any]:
-        return {"lane": lane, "configured": False, "backend": None, "model": None, "device": None}
+        return {
+            "lane": lane, "configured": False, "backend": None, "model": None,
+            "device": None, "in_process": None, "transport": None,
+        }
 
     # embed: KAIZEN_EMBED_BACKEND=sentence-transformers (in-process) else Ollama (needs a model).
     embed_sel = os.environ.get("KAIZEN_EMBED_BACKEND", "ollama").strip().lower()
-    embed_model = os.environ.get("KAIZEN_EMBED_MODEL")
+    embed_model = _env_text("KAIZEN_EMBED_MODEL")
     if embed_sel in ("sentence-transformers", "sentence_transformers", "st"):
         from .sentence_transformers_backend import _DEFAULT_MODEL as _ST_EMBED
 
@@ -284,7 +323,7 @@ def describe_backends() -> list[dict[str, Any]]:
 
     # text: KAIZEN_TEXT_BACKEND/KAIZEN_LLM_BACKEND=transformers (in-process, has a default) else Ollama.
     text_sel = (os.environ.get("KAIZEN_TEXT_BACKEND") or os.environ.get("KAIZEN_LLM_BACKEND") or "ollama").strip().lower()
-    text_model = os.environ.get("KAIZEN_LLM_MODEL")
+    text_model = _env_text("KAIZEN_LLM_MODEL")
     if text_sel in ("transformers", "hf", "huggingface"):
         from .transformers_backend import _DEFAULT_MODEL as _HF_TEXT
 
@@ -302,14 +341,14 @@ def describe_backends() -> list[dict[str, Any]]:
         from .cross_encoder_backend import _DEFAULT_MODEL as _CE_RERANK
 
         lanes.append({"lane": "rerank", "configured": True, "backend": "sentence-transformers",
-                      "model": os.environ.get("KAIZEN_RERANK_MODEL") or _CE_RERANK,
+                      "model": _env_text("KAIZEN_RERANK_MODEL") or _CE_RERANK,
                       "device": torch_device, "in_process": True})
     else:
         lanes.append(off("rerank"))
 
     # pii: opt-in via KAIZEN_PII_MODEL or KAIZEN_PII_BACKEND.
     pii_sel = os.environ.get("KAIZEN_PII_BACKEND", "").strip().lower()
-    pii_model = os.environ.get("KAIZEN_PII_MODEL")
+    pii_model = _env_text("KAIZEN_PII_MODEL")
     if pii_sel or pii_model:
         from .gliner_pii_backend import _DEFAULT_MODEL as _GL_PII
 

@@ -35,6 +35,7 @@ function Resolve-AkFullPath {
 }
 
 function Resolve-AkDevRoot {
+    # Resolution precedence is explicit DevRoot, DEVROOT, then repo parent; an implicit system-drive parent is denied.
     param(
         [string]$DevRoot,
         [Parameter(Mandatory=$true)][string]$RepoRoot,
@@ -48,7 +49,8 @@ function Resolve-AkDevRoot {
     }
     $candidate = Resolve-AkFullPath (Split-Path -Parent $RepoRoot)
     $root = [System.IO.Path]::GetPathRoot($candidate)
-    if ($root -and $root.TrimEnd('\') -ieq 'C:') {
+    $systemDrive = if ([string]::IsNullOrWhiteSpace($env:SystemDrive)) { 'C:' } else { $env:SystemDrive }
+    if ($root -and $root.TrimEnd('\') -ieq $systemDrive.TrimEnd('\')) {
         throw 'DEVROOT was not supplied and the repo parent is on the system drive. Pass -DevRoot explicitly.'
     }
     return $candidate
@@ -101,11 +103,12 @@ function Fit-AkLine {
 }
 
 function Get-AkSafeTail {
+    # Read at most the last MaxLines through a shared-read handle; missing files, errors, and nonpositive limits return empty.
     param(
         [Parameter(Mandatory=$true)][string]$Path,
         [int]$MaxLines = 8
     )
-    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    if ($MaxLines -le 0 -or -not (Test-Path -LiteralPath $Path)) { return @() }
     try {
         $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {
@@ -243,12 +246,14 @@ function Write-AkProgress {
 }
 
 function Invoke-AkStep {
+    # Run and record one numbered step, honoring plan/self-test gates and rethrowing failures after state persistence.
     param(
         [Parameter(Mandatory=$true)][string]$Id,
         [Parameter(Mandatory=$true)][string]$Name,
         [Parameter(Mandatory=$true)][scriptblock]$ScriptBlock
     )
     $stepNo = if ($script:AkStepIndex.ContainsKey($Id)) { [int]$script:AkStepIndex[$Id] } else { $script:AkCurrentStep + 1 }
+    if ($script:AkSteps.Count -gt 0) { $stepNo = [Math]::Min($script:AkSteps.Count, $stepNo) }
     $script:AkCurrentStep = $stepNo
     $script:AkCurrentStepName = $Name
     $before = [Math]::Max(0, $stepNo - 1)
@@ -325,7 +330,6 @@ function Write-AkCommandDashboard {
         [string]$Note
     )
     if ($script:AkNoProgressHeader) { return }
-    try { Clear-Host } catch { }
     $completed = [Math]::Max(0, $script:AkCurrentStep - 1)
     $total = [Math]::Max(1, $script:AkSteps.Count)
     $pct = [int][Math]::Floor(($completed / [double]$total) * 100)
@@ -346,6 +350,7 @@ function Write-AkCommandDashboard {
 }
 
 function Invoke-AkNative {
+    # Run a native executable in a background job, stream output to its log, and throw on nonzero unless IgnoreExitCode.
     param(
         [Parameter(Mandatory=$true)][string]$Exe,
         [string[]]$Arguments = @(),
@@ -354,7 +359,10 @@ function Invoke-AkNative {
         [switch]$IgnoreExitCode
     )
     $display = $Exe
-    if ($Arguments.Count -gt 0) { $display = "$Exe $($Arguments -join ' ')" }
+    if ($Arguments.Count -gt 0) {
+        $displayArguments = $Arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ } }
+        $display = "$Exe $($displayArguments -join ' ')"
+    }
     Assert-AkExternalAllowed $display
 
     $log = Get-AkCommandLogPath $Exe
@@ -401,11 +409,21 @@ function Invoke-AkNative {
     Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
     Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
 
-    $exitCode = 1
+    $exitCode = $null
     if (Test-Path -LiteralPath $exitFile) {
-        try { $exitCode = [int]((Get-Content -LiteralPath $exitFile -ErrorAction Stop | Select-Object -First 1).Trim()) } catch { $exitCode = 1 }
+        try {
+            $exitText = Get-Content -LiteralPath $exitFile -ErrorAction Stop | Select-Object -First 1
+            if ($null -ne $exitText -and -not [string]::IsNullOrWhiteSpace([string]$exitText)) { $exitCode = [int]$exitText.Trim() }
+        } catch {}
         Remove-Item -LiteralPath $exitFile -Force -ErrorAction SilentlyContinue
     }
+    if ($null -eq $exitCode) {
+        try {
+            $exitMatch = Get-AkSafeTail -Path $log -MaxLines 20 | Select-String -Pattern '^EXIT CODE:\s*(-?\d+)\s*$' | Select-Object -Last 1
+            if ($null -ne $exitMatch) { $exitCode = [int]$exitMatch.Matches[0].Groups[1].Value }
+        } catch {}
+    }
+    if ($null -eq $exitCode) { $exitCode = 1 }
     $status = if ($exitCode -eq 0) { 'COMPLETE' } else { 'FAILED' }
     Write-AkCommandDashboard -Display $display -LogPath $log -Elapsed ((Get-Date) - $start) -Spinner '*' -Status $status -Note $ActivityNote
     if ($exitCode -ne 0) {
@@ -417,13 +435,27 @@ function Invoke-AkNative {
 }
 
 function Invoke-AkDownload {
+    # Stream through a partial file, validate supplied length/hash and server length, then atomically promote; cached files are reused unless Force.
     param(
         [Parameter(Mandatory=$true)][string]$Uri,
         [Parameter(Mandatory=$true)][string]$OutFile,
+        [string]$ExpectedSha256,
+        [Nullable[Int64]]$ExpectedLength,
         [switch]$Force
     )
     Assert-AkNetworkAllowed $Uri
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and $ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'ExpectedSha256 must contain exactly 64 hexadecimal characters.'
+    }
     if ((Test-Path -LiteralPath $OutFile) -and (-not $Force)) {
+        $existing = Get-Item -LiteralPath $OutFile -ErrorAction Stop
+        if ($null -ne $ExpectedLength -and $existing.Length -ne [int64]$ExpectedLength) {
+            throw "Cached download length mismatch for ${OutFile}: expected $ExpectedLength, observed $($existing.Length)."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+            $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $OutFile -ErrorAction Stop).Hash
+            if ($existingHash -ine $ExpectedSha256) { throw "Cached download SHA-256 mismatch for ${OutFile}." }
+        }
         Write-Host ("Already downloaded: {0}" -f $OutFile) -ForegroundColor Green
         return
     }
@@ -435,11 +467,15 @@ function Invoke-AkDownload {
     Add-Content -LiteralPath $log -Value ("DOWNLOAD: {0}" -f $Uri) -Encoding UTF8
     Add-Content -LiteralPath $log -Value ("OUTFILE: {0}" -f $OutFile) -Encoding UTF8
 
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
     $request = [System.Net.HttpWebRequest]::Create($Uri)
     $request.UserAgent = 'Agent-Kaizen-Installer'
+    $request.Timeout = 120000
+    $request.ReadWriteTimeout = 120000
     $response = $null
     $inStream = $null
     $outStream = $null
+    $downloadComplete = $false
     try {
         $response = $request.GetResponse()
         $total = [int64]$response.ContentLength
@@ -470,17 +506,36 @@ function Invoke-AkDownload {
                 $lastPaint = $now
             }
         }
+        if ($total -gt 0 -and $readTotal -ne $total) {
+            throw "Download length mismatch for ${Uri}: expected $total bytes, received $readTotal."
+        }
+        $downloadComplete = $true
     } finally {
         if ($null -ne $outStream) { $outStream.Dispose() }
         if ($null -ne $inStream) { $inStream.Dispose() }
         if ($null -ne $response) { $response.Dispose() }
+        if (-not $downloadComplete) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue }
     }
-    Move-Item -LiteralPath $partial -Destination $OutFile -Force
+    try {
+        $download = Get-Item -LiteralPath $partial -ErrorAction Stop
+        if ($null -ne $ExpectedLength -and $download.Length -ne [int64]$ExpectedLength) {
+            throw "Download length mismatch for ${Uri}: expected $ExpectedLength bytes, received $($download.Length)."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256)) {
+            $observedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $partial -ErrorAction Stop).Hash
+            if ($observedHash -ine $ExpectedSha256) { throw "Download SHA-256 mismatch for ${Uri}." }
+        }
+        Move-Item -LiteralPath $partial -Destination $OutFile -Force
+    } catch {
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        throw
+    }
     Add-Content -LiteralPath $log -Value ("FINISHED: {0}" -f (Get-Date).ToString('s')) -Encoding UTF8
     Write-AkCommandDashboard -Display ("Download $Uri") -LogPath $log -Elapsed ([TimeSpan]::Zero) -Spinner '*' -Status 'COMPLETE' -Note ('Saved {0}' -f $OutFile)
 }
 
 function Resolve-AkPythonExe {
+    # Resolve explicit input, shared venv, python, then py; explicit non-path command names are trusted for PATH lookup by the caller.
     param(
         [string]$PythonExe,
         [Parameter(Mandatory=$true)][string]$DevRoot,

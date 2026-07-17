@@ -66,6 +66,7 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # ---------------------------------------------------------------------------- GPU (nvidia-smi)
 
 def _num(text: str) -> float | int | None:
+    """Parse a CSV cell to int/float; blank / `N/A` / `[N/A...]` → None; int when integral."""
     text = text.strip()
     if not text or text.upper().startswith("[N/A") or text.upper() == "N/A":
         return None
@@ -77,7 +78,7 @@ def _num(text: str) -> float | int | None:
 
 
 def gpu_snapshot() -> dict[str, Any]:
-    """nvidia-smi one-shot query. ``available: False`` when the tool is absent/failing (never raises)."""
+    """Run the fixed nvidia-smi query; return ``available: False`` when the tool is absent/failing."""
     try:
         proc = subprocess.run(
             ["nvidia-smi", f"--query-gpu={','.join(_GPU_FIELDS)}", "--format=csv,noheader,nounits"],
@@ -133,7 +134,10 @@ def gpu_processes(exclude_pid: int | None = None) -> dict[str, Any]:
         base = cells[1].replace("\\", "/").split("/")[-1]
         if not any(hint in base.lower() for hint in _AI_PROC_HINTS):
             continue
-        pid = _num(cells[0])
+        try:
+            pid = int(cells[0])
+        except ValueError:
+            continue
         if exclude_pid is not None and pid == exclude_pid:
             continue  # the monitor itself (pythonw) renders on the GPU -> don't list it
         procs.append({"pid": pid, "name": base, "vram_mb": _num(cells[2]), "kind": _proc_kind(base)})
@@ -150,6 +154,7 @@ def gpu_processes(exclude_pid: int | None = None) -> dict[str, Any]:
 
 
 def _proc_kind(base: str) -> str:
+    """Map an executable basename to a display kind (ollama/comfyui/torch-python/gpu)."""
     low = base.lower()
     if "llama" in low or "ollama" in low:
         return "ollama"
@@ -228,6 +233,7 @@ def _ollama_root(base_url: str) -> str:
 
 
 def _keep_alive(expires_at: str | None) -> str | None:
+    """Format an ISO `expires_at` into `Xm Ys` remaining / `expired` / None (fractional seconds ≥7 digits truncate to µs on 3.11+; no parse failure)."""
     if not expires_at:
         return None
     try:
@@ -289,8 +295,9 @@ def _ollama_set_keepalive(root: str, model: str, seconds: int) -> None:
 
 
 def _kill_pid(pid: int) -> None:
+    """Force-kill a pid (taskkill /F on Windows, kill -9 elsewhere); does NOT check the subprocess exit code (see F2)."""
     cmd = ["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)]
-    subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW)
+    subprocess.run(cmd, capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW, check=True)
 
 
 def stop_gpu_models(kill_processes: bool = True) -> dict[str, Any]:
@@ -350,17 +357,22 @@ def recent_activity(limit: int) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------------------- optional probe
 
-def _probe_lanes(lanes: list[dict[str, Any]]) -> None:
-    """One-shot: instantiate each configured backend and merge its real probe() into the lane.
-
-    LOADS MODEL WEIGHTS (VRAM, like B1) -- opt-in via --probe, never on the --watch loop.
-    """
-    factories = {
+def _backend_factories() -> dict[str, Any]:
+    """Resolve backend factories at call time so tests and runtime configuration can patch them."""
+    return {
         "embed": get_embedding_backend,
         "text": get_text_backend,
         "rerank": get_rerank_backend,
         "pii": get_pii_backend,
     }
+
+
+def _probe_lanes(lanes: list[dict[str, Any]]) -> None:
+    """One-shot: instantiate each configured backend and merge its real probe() into the lane.
+
+    LOADS MODEL WEIGHTS (VRAM, like B1) -- opt-in via --probe, never on the --watch loop.
+    """
+    factories = _backend_factories()
     for lane in lanes:
         if not lane.get("configured"):
             continue
@@ -387,13 +399,9 @@ def _probe_hold(args: Any, hold: int, interval: float, *, as_json: bool) -> dict
     loads are too brief for a poll to catch). Re-renders the live GPU/Ollama panels each ``interval``
     (it does NOT reload -- the held refs hold the weights). ``Ctrl-C`` releases early. Loads weights
     (like B1); reached only via the opt-in ``--probe``."""
-    factories = {  # resolved at call time (like _probe_lanes), so tests can patch them
-        "embed": get_embedding_backend,
-        "text": get_text_backend,
-        "rerank": get_rerank_backend,
-        "pii": get_pii_backend,
-    }
-    limit = int(getattr(args, "limit", None) or _DEFAULT_RECENT)
+    factories = _backend_factories()
+    raw_limit = getattr(args, "limit", None)
+    limit = int(_DEFAULT_RECENT if raw_limit is None else raw_limit)
     held: list[Any] = []  # references keep the in-process torch weights from being freed during the hold
     ollama_targets: list[tuple[str, str]] = []  # (root, model) of Ollama models the probe loaded
     lanes = describe_backends()
@@ -453,7 +461,7 @@ def _probe_hold(args: Any, hold: int, interval: float, *, as_json: bool) -> dict
                 sys.stdout.flush()
                 if time.monotonic() >= end:
                     break
-                time.sleep(min(interval, max(0.1, end - time.monotonic())))
+                time.sleep(min(interval, max(0.0, end - time.monotonic())))
         except KeyboardInterrupt:
             sys.stdout.write("\n")
             sys.stdout.flush()
@@ -483,7 +491,9 @@ def _release_held(held: list[Any], ollama_targets: list[tuple[str, str]]) -> Non
 # ---------------------------------------------------------------------------- aggregate + render
 
 def collect(args: Any) -> dict[str, Any]:
-    limit = int(getattr(args, "limit", None) or _DEFAULT_RECENT)
+    """Aggregate the four read-only signals into a snapshot dict; runs `_probe_lanes` only when `args.probe`."""
+    raw_limit = getattr(args, "limit", None)
+    limit = int(_DEFAULT_RECENT if raw_limit is None else raw_limit)
     lanes = describe_backends()
     if getattr(args, "probe", False):
         _probe_lanes(lanes)
@@ -498,17 +508,20 @@ def collect(args: Any) -> dict[str, Any]:
 
 
 def _lane_state(lane: dict[str, Any], loaded_names: set[str]) -> str:
+    """Derive a lane display state (off/ready/unreachable/loaded/idle/armed) from config + probe + Ollama residency."""
     if not lane.get("configured"):
         return "off"
     if "reachable" in lane:  # --probe ran
         return "ready" if lane["reachable"] else "unreachable"
     if lane.get("backend") == "ollama":
         model = lane.get("model") or ""
-        return "loaded" if model in loaded_names else "idle"
+        normalized = {name.removesuffix(":latest") for name in loaded_names}
+        return "loaded" if model.removesuffix(":latest") in normalized else "idle"
     return "armed"  # in-process torch lane: loads per op, not resident
 
 
 def render(snapshot: dict[str, Any], *, interval: float | None) -> str:
+    """Render a snapshot dict to the multi-line terminal view; `interval` labels watch vs one-shot."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mode = f"watch {interval:g}s" if interval else "one-shot"
     lines = [f"Agent Kaizen -- backend monitor   {now}   [{mode}]"]
@@ -570,9 +583,8 @@ def render(snapshot: dict[str, Any], *, interval: float | None) -> str:
             lines.append(f"  {ts}  {str(lane):<11} {str(r.get('model', '?')):<28} {lat}")
 
     # Local project backend config (what THIS repo would run) -- a footer, not the live signal.
-    configured = [lane for lane in snapshot["backends"] if lane.get("configured")]
     lines.append("")
-    if not configured:
+    if not any(lane.get("configured") for lane in snapshot["backends"]):
         lines.append("This project's backend config: none set (embed/text/rerank/pii unconfigured)")
     else:
         summary = "  ".join(f"{lane['lane']}={_lane_state(lane, loaded_names)}" for lane in snapshot["backends"])
@@ -582,6 +594,7 @@ def render(snapshot: dict[str, Any], *, interval: float | None) -> str:
 
 
 def _fmt(value: Any, unit: str) -> str:
+    """Value+unit`, or `?unit` when value is None."""
     return f"{value}{unit}" if value is not None else f"?{unit}"
 
 
@@ -612,6 +625,7 @@ def _enable_vt() -> None:
 
 
 def _watch(args: Any, interval: float) -> dict[str, Any]:
+    """Blocking watch loop: re-render `collect(args)` every `interval`, clear-screen each frame, exit on Ctrl-C."""
     _enable_vt()
     try:
         while True:
@@ -628,7 +642,7 @@ def _watch(args: Any, interval: float) -> dict[str, Any]:
 # ---------------------------------------------------------------------------- entry point
 
 def model_monitor(args: Any) -> dict[str, Any]:
-    """B6: aggregate + render the live backend-model view (read-only; runs no inference)."""
+    """B6: run probe-hold when requested, otherwise TTY-watch, JSON snapshot, or one-shot rendered snapshot in that precedence; ordinary collection is read-only and runs no inference."""
     as_json = bool(getattr(args, "json", False))
     watch = bool(getattr(args, "watch", False))
     hold = int(getattr(args, "hold", 0) or 0)

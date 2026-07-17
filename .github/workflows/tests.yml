@@ -1,9 +1,21 @@
 name: tests
 
+# One authoritative control per present risk. Do NOT add Socket, CodeQL, Bandit, OSV,
+# zizmor, Dependency Review, or a Dependabot bot lane to this workflow: those are deferred
+# controls, each enabled only for a named gap after its own review (see the v5 PR-standards
+# plan). Actions are pinned to full commit SHAs; review each update before replacing a pin.
+
 on:
   push:
     branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   unittest:
@@ -14,24 +26,69 @@ jobs:
         # wheel is ever unavailable on a runner, drop that leg here rather than unpinning.
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-kaizen.txt
       - name: Run the suite (isolated KAIZEN_REPO_ROOT temp roots; the live tests use in-process mock servers, no network)
-        run: python -m unittest discover -s AI/tests
+        run: python tests/run_tests.py
 
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22.21.1"
+          package-manager-cache: false
       - name: Audit declared dependencies for known advisories
         run: |
-          python -m pip install pip-audit
-          pip-audit -r requirements-kaizen.txt -r requirements-docs.txt
+          python -m pip install pip-audit==2.10.1
+          pip-audit -r requirements-kaizen.txt -r requirements-docs.txt -r requirements-pytorch.txt
+      - name: Install locked extension dependencies
+        working-directory: extension
+        run: npm ci
+      - name: Audit extension dependencies for known advisories
+        working-directory: extension
+        run: npm audit
+      - name: Test extension
+        working-directory: extension
+        run: npm test
+
+  dco:
+    # Developer Certificate of Origin gate: every non-bot PR commit needs a Signed-off-by trailer.
+    # Runs only on pull_request and executes the frozen base branch validator, never PR code.
+    # The bootstrap PR must merge before this job can be calibrated and made required.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .dco-base
+          sparse-checkout: security/validate_dco.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Validate DCO sign-off
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .dco-base/security/validate_dco.py --event-file "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" --json

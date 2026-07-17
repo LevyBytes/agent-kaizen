@@ -1,0 +1,36 @@
+# Kaizen hub pair (v8 M17): the two hub services described in README.md as one compose unit.
+#
+#   docker compose -f docker-compose.hub.yml up -d        # idempotent: running+unchanged => no-op
+#   docker compose -f docker-compose.hub.yml config -q    # pre-flight validate without starting
+# No restart policy: every hub start requires an explicit owner-run `docker compose up`.
+#
+# Before first build: place the tursodb release binary for this host's architecture next to this file
+# as ./tursodb (Linux x86_64 or ARM64 — the ARM64 artifact exists, enabling a GB10-class hub).
+#
+# Publishing: the defaults bind 127.0.0.1 so a fresh hub exposes NOTHING off-host. To serve the tailnet,
+# replace 127.0.0.1 with this host's Tailscale address (never 0.0.0.0 — the tailnet ACL is the outer
+# boundary and git daemon itself has no auth). Address peers by MagicDNS name, not raw IP.
+
+services:
+  sync:
+    build:
+      context: .
+      dockerfile: hub-sync.Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - hub-data:/data
+
+  git:
+    build:
+      context: .
+      dockerfile: hub-git.Dockerfile
+    ports:
+      - "127.0.0.1:9418:9418"
+    volumes:
+      - hub-repos:/repos
+
+volumes:
+  # Named volumes survive container replacement. NEVER restore hub-data from an old snapshot without reading the rewind warning in README.md (watermark refusal on the node side).
+  hub-data:
+  hub-repos:

@@ -11,22 +11,11 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import threading
 from typing import Any
 
 from ..denials import KaizenDenied
-
-
-def _resolve_device(spec: str | None = None) -> str:
-    """GPU-first device: ``auto`` -> CUDA when present, else CPU (honors KAIZEN_TORCH_DEVICE)."""
-    spec = (spec or os.environ.get("KAIZEN_TORCH_DEVICE", "auto")).strip().lower()
-    if spec in ("cpu", "cuda"):
-        return spec
-    try:
-        import torch
-
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:  # noqa: BLE001 -- torch absent -> CPU
-        return "cpu"
+from .transformers_backend import _resolve_device as _resolve_torch_device
 
 
 @contextlib.contextmanager
@@ -37,11 +26,14 @@ def _quiet():
     UnicodeEncodeError on a non-UTF-8 console (Windows cp1252). Capturing it keeps
     the backend robust regardless of the terminal encoding.
     """
+    from ..quiet import quiet_stderr
+
     sink = io.StringIO()
-    with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+    with contextlib.redirect_stdout(sink), quiet_stderr("gliner2", "transformers"):
         yield
 
 _DEFAULT_MODEL = "fastino/gliner2-privacy-filter-PII-multi"  # apache-2.0, ~0.3B, 42 PII types
+# Deliberately narrow high-risk default; callers may opt into the model's broader label set.
 _DEFAULT_LABELS = [
     "person",
     "email",
@@ -57,6 +49,7 @@ _DEFAULT_LABELS = [
 
 
 class Gliner2PiiBackend:
+    """Advisory in-process GLiNER2 PII NER; opt-in; returns advisory char spans; augments, never replaces, the deterministic regex gate."""
     name = "gliner2"
 
     def __init__(self, *, model: str | None = None, labels: list[str] | None = None) -> None:
@@ -64,8 +57,17 @@ class Gliner2PiiBackend:
         self.labels = labels or _DEFAULT_LABELS
         self._model_obj: Any = None
         self._device: str | None = None
+        self._load_lock = threading.Lock()
 
     def _load(self) -> Any:
+        """Deferred heavy import + cached model load; raises KaizenDenied (DENIED_BACKEND_UNAVAILABLE when the extra is absent, DENIED_BACKEND_MODEL on load/download failure); moves to CUDA when resolved."""
+        if self._model_obj is not None:
+            return self._model_obj
+        with self._load_lock:
+            return self._load_locked()
+
+    def _load_locked(self) -> Any:
+        """Load exactly once while _load_lock is held."""
         if self._model_obj is not None:
             return self._model_obj
         try:
@@ -96,7 +98,7 @@ class Gliner2PiiBackend:
                 exit_code=2,
             ) from error
         # GPU-first: GLiNER2 loads on CPU by default; move it to the resolved device.
-        self._device = _resolve_device()
+        self._device = _resolve_torch_device(os.environ.get("KAIZEN_TORCH_DEVICE", "auto"))
         if self._device == "cuda":
             with _quiet():
                 for target in (self._model_obj, getattr(self._model_obj, "model", None)):
@@ -110,21 +112,25 @@ class Gliner2PiiBackend:
         return self._model_obj
 
     def scan(self, text: str) -> list[dict[str, Any]]:
-        """Return advisory PII spans as ``[{label, start, end}]`` (defensive to the GLiNER2 shape)."""
+        """Return advisory PII spans; repeated dict matches advance by occurrence and missing entities yield no hits."""
         if not text:
             return []
         model = self._load()
         with _quiet():
             raw = model.extract_entities(text, self.labels)
-        entities = raw.get("entities") if isinstance(raw, dict) else raw
+        entities = raw.get("entities", raw) if isinstance(raw, dict) else raw
         hits: list[dict[str, Any]] = []
         if isinstance(entities, dict):
             # GLiNER2 shape: {label: [matched_text, ...]}; locate each match to a char span.
+            next_start: dict[tuple[str, str], int] = {}
             for label, matches in entities.items():
                 for match in matches or []:
                     if not isinstance(match, str):
                         continue
-                    start = text.find(match)
+                    key = (str(label), match)
+                    start = text.find(match, next_start.get(key, 0))
+                    if start >= 0:
+                        next_start[key] = start + len(match)
                     hits.append(
                         {
                             "label": str(label),
@@ -146,5 +152,6 @@ class Gliner2PiiBackend:
         return hits
 
     def probe(self) -> dict[str, Any]:
+        """Warm-loads via a trivial `scan("probe")` (real inference) and returns backend/kind/model/device metadata; may raise the same KaizenDenied as `_load`."""
         self.scan("probe")
         return {"backend": self.name, "kind": "pii", "model": self.model, "device": self._device, "in_process": True}

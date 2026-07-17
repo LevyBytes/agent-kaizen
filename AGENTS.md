@@ -6,7 +6,7 @@
 
 Agent Kaizen is a local implementation of the Kaizen System for AI coding-agent work in VS Code projects.
 
-**Run everything through the shared Python venv, not a repo-local `.venv`.** The interpreter is `$DEVROOT/Python/venvs/kaizen/Scripts/python.exe` (Windows) or `$DEVROOT/Python/venvs/kaizen/bin/python` (Linux/macOS), built by `setup/SETUP.md` from `requirements-kaizen.txt`. Activate it (or call it by full path) before any `python kaizen.py ...` or `python -m unittest discover -s AI/tests` in this file; a repo-local `.venv` is only a fallback and usually absent.
+**Run everything through the shared Python venv, not a repo-local `.venv`.** The interpreter is `$DEVROOT/Python/venvs/kaizen/Scripts/python.exe` (Windows) or `$DEVROOT/Python/venvs/kaizen/bin/python` (Linux/macOS), built by `setup/SETUP.md` from `requirements-kaizen.txt`. Activate it (or call it by full path) before any `python kaizen.py ...` or `python tests/run_tests.py` in this file; the test runner pins all scratch and bytecode beneath `AI/work`, and a repo-local `.venv` is only a fallback and usually absent.
 
 Use [`Kaizen_System.md`](Kaizen_System.md) for the full portable method:
 
@@ -46,11 +46,11 @@ Common command families:
 - `K*` DB/core; `W*` tasks/plans/packets; `G*` GOTCHA; `L*` LEARNING/LEARNED.
 - `Q*` quality/evals/verification/proof (incl. `Q8` output-validate against record schemas); `A*` artifacts; `M*` migration.
 - `R*` reports; `S*` source locks; `I*` IRL Review; `X*` private policy context.
-- `E*` evidence ingestion (ingest-file/chunk/query/inspect); `T*` traces and eval scores; `O*` improvement lab; `Y*` generative runs (ComfyUI); `B*` model/embedding backends (Ollama).
+- `E*` evidence ingestion (ingest-file/chunk/query/inspect); `T*` traces and eval scores; `O*` improvement lab; `Y*` generative runs (ComfyUI); `B*` model/embedding backends (Ollama, local PyTorch, embedding, reranking, and PII).
 
 Run `python kaizen.py --help` for approved operations, or `python kaizen.py K0 --query "<intent>"` to find the right operation from intent. Do not invent operation codes or flags.
 
-- Windows PowerShell 5.1 strips quotes inside JSON-valued args: prefer `--payload-json-file`, `--summary-file`, or `--body-file`; otherwise escape inline (`--payload-json "{\"k\":\"v\"}"`).
+- Windows PowerShell 5.1 strips quotes inside JSON-valued args: prefer `--payload-json-file`, `--summary-file`, or `--body-file`; inline escaping (`--payload-json "{\"k\":\"v\"}"`) is a fragile last resort.
 
 Markdown files such as `evals/GOTCHA.md`, `evals/LEARNING.md`, and `evals/LEARNED.md` are command stubs or generated views. Durable records live in the DB.
 
@@ -62,7 +62,9 @@ Markdown files such as `evals/GOTCHA.md`, `evals/LEARNING.md`, and `evals/LEARNE
 - `setup/` - install/bootstrap scripts (installer, `SetDevRoot.cmd`, `link-skills`).
 - `kaizen.py` - data-plane CLI.
 - `kaizen_components/` - engine package behind the CLI.
+- `extension/` - VS Code sidebar/popout controller over the local supervisor daemon.
 - `requirements-kaizen.txt` - pinned Python deps.
+- `tests/` - canonical test, benchmark, verification, and acceptance sources.
 - `support_scripts/` - auxiliary helper scripts.
 - `AI/db/` - local/private DB, manifests, exports, reports.
 - `AI/work/` - task scratch and transition ledger.

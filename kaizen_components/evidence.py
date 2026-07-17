@@ -41,6 +41,7 @@ _MEDIA = {
 
 
 def _strip_html(raw: str) -> str:
+    """Strip script/style then tags, unescape entities, collapse intra-line whitespace; lossy plain-text extraction."""
     no_scripts = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", raw)
     text = re.sub(r"(?s)<[^>]+>", " ", no_scripts)
     text = html.unescape(text)
@@ -48,6 +49,7 @@ def _strip_html(raw: str) -> str:
 
 
 def _backend_unavailable(ext: str, package: str) -> KaizenDenied:
+    """Builds DENIED_BACKEND_UNAVAILABLE for an absent optional doc backend (pypdf/python-docx/openpyxl)."""
     return KaizenDenied(
         "DENIED_BACKEND_UNAVAILABLE",
         {
@@ -63,11 +65,14 @@ def _backend_unavailable(ext: str, package: str) -> KaizenDenied:
 # can shrink them without writing multi-MB fixtures; the defaults are the shipped policy.
 MAX_PDF_BYTES = int(os.environ.get("KAIZEN_MAX_PDF_BYTES") or 25 * 1024 * 1024)
 MAX_PDF_PAGES = int(os.environ.get("KAIZEN_MAX_PDF_PAGES") or 500)
+MAX_TEXT_BYTES = int(os.environ.get("KAIZEN_MAX_TEXT_BYTES") or 25 * 1024 * 1024)
+_MAX_CHUNK_CHARS_FOR_WORD_BOUND = 1999
 
 
 def _extract_pdf(path: Path) -> tuple[str, str, str, float]:
     # Size gate first, BEFORE the pypdf import: it needs no optional dependency and
     # stops a hostile multi-GB file before any parsing work happens.
+    """Document return tuple (text, backend, method, confidence) and the DENIED taxonomy (too-large/encrypted/too-many-pages/unreadable/no-text); size gate precedes pypdf import."""
     size = path.stat().st_size
     if size > MAX_PDF_BYTES:
         raise KaizenDenied(
@@ -113,7 +118,7 @@ def _extract_pdf(path: Path) -> tuple[str, str, str, float]:
                     },
                     exit_code=2,
                 )
-            text = "\n\n".join((page.extract_text() or "") for page in reader.pages)
+            text = "\n\n".join(filter(None, (page.extract_text() or "" for page in reader.pages)))
     except KaizenDenied:
         raise
     except Exception as error:
@@ -177,6 +182,17 @@ def _extract_text(path: Path) -> tuple[str, str, str, str, float]:
     """Return (text, media_type, backend, extraction_method, confidence)."""
     ext = path.suffix.lower()
     media = _MEDIA.get(ext, "application/octet-stream")
+    if ext in {".txt", ".md", ".markdown", ".csv", ".html", ".htm"} and path.stat().st_size > MAX_TEXT_BYTES:
+        raise KaizenDenied(
+            "DENIED_FILE_TOO_LARGE",
+            {
+                "path": str(path),
+                "bytes": path.stat().st_size,
+                "max_bytes": MAX_TEXT_BYTES,
+                "required_action": "split or pre-process the text file before ingesting it",
+            },
+            exit_code=2,
+        )
     if ext in {".txt", ".md", ".markdown", ".csv"}:
         return path.read_text(encoding="utf-8-sig", errors="replace"), media, "native", "native", 1.0
     if ext in {".html", ".htm"}:
@@ -220,6 +236,7 @@ def _heading_before(text: str, position: int) -> str:
 
 def _recursive_chunk(text: str, max_chars: int = 1024) -> list[tuple[str, int, int]]:
     """Deterministic char-window chunker that prefers paragraph/sentence breaks."""
+    max_chars = min(max_chars, _MAX_CHUNK_CHARS_FOR_WORD_BOUND)
     chunks: list[tuple[str, int, int]] = []
     n = len(text)
     i = 0
@@ -280,23 +297,27 @@ def _semantic_chunk(
     chunks: list[tuple[str, int, int]] = []
     cur_text = ""
     cur_start: int | None = None
+    cur_end: int | None = None
+    max_chars = min(max_chars, _MAX_CHUNK_CHARS_FOR_WORD_BOUND)
     for index, (seg, start) in enumerate(segments):
         if cur_start is None:
-            cur_text, cur_start = seg, start
+            cur_text, cur_start, cur_end = seg, start, start + len(seg)
             continue
         boundary = _cosine_distance(embeddings[index - 1], embeddings[index]) > threshold
         too_big = len(cur_text) + len(seg) + 2 > max_chars
         if boundary or too_big:
-            chunks.append((cur_text, cur_start, cur_start + len(cur_text)))
-            cur_text, cur_start = seg, start
+            chunks.append((cur_text, cur_start, cur_end or cur_start + len(cur_text)))
+            cur_text, cur_start, cur_end = seg, start, start + len(seg)
         else:
             cur_text = cur_text + "\n\n" + seg
+            cur_end = start + len(seg)
     if cur_start is not None:
-        chunks.append((cur_text, cur_start, cur_start + len(cur_text)))
+        chunks.append((cur_text, cur_start, cur_end or cur_start + len(cur_text)))
     return chunks
 
 
 def ingest_file(args: Any) -> dict[str, Any]:
+    """E1 entry: resolve/gate path, extract text, one-tx write of source_lock + evidence_document + evidence_blocks; external ingests store sanitized `external:<basename>` origin; OK envelope shape."""
     allow_external = bool(getattr(args, "allow_external", False))
     path = resolve_user_path(
         getattr(args, "path", None),
@@ -433,6 +454,7 @@ def ingest_file(args: Any) -> dict[str, Any]:
 
 
 def chunk_document(args: Any) -> dict[str, Any]:
+    """E3 entry: rebuild full_text from ordered blocks, chunk recursive/semantic, schema-gate each chunk, optional embed with graceful degrade; NOT idempotent (re-run duplicates, F1)."""
     document_id = getattr(args, "id", None)
     if not document_id:
         raise KaizenDenied("DENIED_ID_REQUIRED", {"required_action": "resubmit with --id (document id)"}, exit_code=2)
@@ -464,6 +486,7 @@ def chunk_document(args: Any) -> dict[str, Any]:
             },
             exit_code=2,
         )
+    effective_chunker = chunker
     if chunker == "semantic":
         from .backends import embed_batched, get_embedding_backend
 
@@ -476,10 +499,17 @@ def chunk_document(args: Any) -> dict[str, Any]:
             )
         segments = _split_segments(full_text)
         if len(segments) > 1:
-            seg_vectors = embed_batched(sem_backend, [seg for seg, _start in segments])  # raises DENIED if the backend/extra is absent
+            seg_vectors = embed_batched(
+                sem_backend,
+                [seg for seg, _start in segments],
+                record_trace=True,
+                task_id=getattr(args, "task_id", None),
+                is_test=1 if getattr(args, "test", False) else 0,
+            )
             pieces = _semantic_chunk(segments, seg_vectors)
         else:
             pieces = _recursive_chunk(full_text)
+            effective_chunker = "recursive"
     else:
         pieces = _recursive_chunk(full_text)
     created = now()
@@ -499,7 +529,7 @@ def chunk_document(args: Any) -> dict[str, Any]:
             "token_count": _estimate_tokens(body),
             # cap derived heading context to the schema bound so a long heading never aborts ingest
             "context": " ".join(_heading_before(full_text, start).split()[:60]),
-            "chunker": chunker,
+            "chunker": effective_chunker,
             "backend": "native",
             "neighbor_prev_id": chunk_ids[index - 1] if index > 0 else None,
             "neighbor_next_id": chunk_ids[index + 1] if index < len(chunk_ids) - 1 else None,
@@ -536,6 +566,14 @@ def chunk_document(args: Any) -> dict[str, Any]:
             embedding_note = f"embedding backend unreachable ({denied.code}); chunks stored without embeddings, run B3 later"
 
     def op(conn: Any, _attempt: int) -> None:
+        # Re-chunk atomically replaces the document's old index. Embeddings must go first because the
+        # schema deliberately has no FK cascade; leaving either set would duplicate indices/neighbors.
+        conn.execute(
+            "DELETE FROM chunk_embeddings WHERE chunk_id IN "
+            "(SELECT id FROM evidence_chunks WHERE document_id = ?)",
+            (document_id,),
+        )
+        conn.execute("DELETE FROM evidence_chunks WHERE document_id = ?", (document_id,))
         for chunk_id, payload in records:
             chunk_hash = utc_text_hash({"id": chunk_id, "text": payload["text"], "doc": document_id})
             conn.execute(
@@ -612,7 +650,7 @@ def _chunk_record(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
-def _vector_candidates(query: str, backend: Any, limit: int) -> list[dict[str, Any]]:
+def _vector_candidates(query: str, backend: Any, limit: int) -> tuple[list[dict[str, Any]], Any]:
     """Top-``limit`` candidates from the ACTIVE model's index (chunk_embeddings). Models coexist: other
     models' rows are simply not selected -- no "mismatch". Returns [] for an empty corpus; raises
     DENIED_EMBED_INDEX_ABSENT when chunks exist but the active model has no index yet."""
@@ -631,7 +669,7 @@ def _vector_candidates(query: str, backend: Any, limit: int) -> list[dict[str, A
                 },
                 exit_code=2,
             )
-        return []  # empty corpus -> the lexical baseline handles the query
+        return [], backend  # empty corpus -> the lexical baseline handles the query
     # The query MUST be embedded by the active model (a query embedded by a different model than the
     # index returns meaningless "nearest" rows). Rebuild the backend for the active model if the
     # configured one differs -- the active model is authoritative, not the env.
@@ -652,7 +690,7 @@ def _vector_candidates(query: str, backend: Any, limit: int) -> list[dict[str, A
         "WHERE e.embedding_model = ? ORDER BY dist ASC LIMIT ?",
         (json.dumps(query_vectors[0]), active_model, limit),
     )
-    return [_chunk_record(r) for r in rows]
+    return [_chunk_record(r) for r in rows], backend
 
 
 def _lexical_candidates(query: str, limit: int) -> tuple[list[dict[str, Any]], str]:
@@ -696,6 +734,7 @@ def _rrf_fuse(ranked_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
 
 
 def query_evidence(args: Any) -> dict[str, Any]:
+    """E4 entry: lexical(LIKE/FTS)/semantic/hybrid(RRF)/rerank retrieval; opt-in gating and mode labels; trace side effects; rerank orders only, never acceptance authority."""
     query = getattr(args, "query", None)
     if not query:
         raise KaizenDenied("DENIED_QUERY_REQUIRED", {"required_action": "resubmit with --query"}, exit_code=2)
@@ -729,14 +768,14 @@ def query_evidence(args: Any) -> dict[str, Any]:
             # The active model (stored fact) is what E4 ranks against, not the configured env model.
             active_embed_model = get_active_embedding_model(default=embed_backend.model)
             _t0 = _t_mod.monotonic()
-            vector_records = _vector_candidates(query, embed_backend, retrieve_n)
+            vector_records, query_embed_backend = _vector_candidates(query, embed_backend, retrieve_n)
             # Record the query-embedding model call only when one actually happened. An empty corpus
             # returns [] WITHOUT embedding the query, so gating on vector_records avoids a phantom trace.
             if vector_records:
                 from .trace_records import record_model_call
 
                 record_model_call(
-                    lane="embedding", model=active_embed_model, provider=getattr(embed_backend, "name", None),
+                    lane="embedding", model=active_embed_model, provider=getattr(query_embed_backend, "name", None),
                     latency_ms=int((_t_mod.monotonic() - _t0) * 1000), count=1,
                     task_id=getattr(args, "task_id", None), is_test=1 if getattr(args, "test", False) else 0,
                 )
@@ -777,6 +816,12 @@ def query_evidence(args: Any) -> dict[str, Any]:
 
         _t0 = _t_mod.monotonic()
         scores = rerank_backend.rank(query, [rec["_text"] for rec in records])
+        if len(scores) != len(records):
+            raise KaizenDenied(
+                "DENIED_RERANK_MISMATCH",
+                {"expected": len(records), "actual": len(scores), "required_action": "check the rerank backend"},
+                exit_code=1,
+            )
         from .trace_records import record_model_call
 
         record_model_call(
@@ -793,7 +838,7 @@ def query_evidence(args: Any) -> dict[str, Any]:
     records = records[:limit]
     out = [{k: v for k, v in rec.items() if not k.startswith("_")} for rec in records]
     result: dict[str, Any] = {"status": "OK", "mode": mode, "query": query, "records": out}
-    if embed_backend is not None and ("semantic" in mode or mode.startswith("hybrid")):
+    if vector_records:
         result["embedding_model"] = active_embed_model or embed_backend.model
     result["note"] = (
         "lexical=LIKE baseline (Turso FTS experimental, opt in KAIZEN_TURSO_FTS=1); "
@@ -804,6 +849,7 @@ def query_evidence(args: Any) -> dict[str, Any]:
 
 
 def inspect_evidence(args: Any) -> dict[str, Any]:
+    """E5 entry: dump one document/block/chunk row plus per-model embedding coverage and the active model."""
     record_id = getattr(args, "id", None)
     if not record_id:
         raise KaizenDenied("DENIED_ID_REQUIRED", {"required_action": "resubmit with --id"}, exit_code=2)

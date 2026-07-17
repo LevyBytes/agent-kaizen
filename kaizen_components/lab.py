@@ -12,6 +12,7 @@ auto-applied -- a human promotes the winner through GOTCHA -> LEARNING -> LEARNE
 from __future__ import annotations
 
 import json
+import hashlib
 from typing import Any
 
 from .db import fetch_all, new_id, now, write_tx
@@ -23,10 +24,14 @@ from .task_records import _text_arg
 
 
 def _slug(name: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name.strip().lower()) or "contract"
+    """Purpose (contract -> filesystem-safe slug for report filenames); neutralizes path separators/dots/whitespace to `-`; empty/whitespace -> `"contract"` fallback. NOTE the lossy collision (distinct contracts can share a slug) — ties to F1."""
+    normalized = name.strip().lower()
+    slug = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in normalized) or "contract"
+    return slug if slug == normalized else f"{slug}-{hashlib.sha256(name.encode('utf-8')).hexdigest()[:8]}"
 
 
 def _require_contract(args: Any) -> str:
+    """Returns the required `--contract`; raises `DENIED_CONTRACT_REQUIRED` (exit 2) when absent."""
     contract = getattr(args, "contract", None)
     if not contract:
         raise KaizenDenied(
@@ -35,6 +40,20 @@ def _require_contract(args: Any) -> str:
             exit_code=2,
         )
     return contract
+
+
+def _usage_count(usage: dict[str, Any], name: str) -> int:
+    """Return a nonnegative integer usage count, treating only a missing/null value as zero."""
+    value = usage.get(name)
+    if value is None:
+        return 0
+    if type(value) is not int or value < 0:
+        raise KaizenDenied(
+            "DENIED_BACKEND_MALFORMED",
+            {"field": name, "required_action": "the judge backend must return nonnegative integer token counts"},
+            exit_code=1,
+        )
+    return value
 
 
 def assemble_case_set(args: Any) -> dict[str, Any]:
@@ -104,7 +123,15 @@ def add_proposal(args: Any) -> dict[str, Any]:
     payload_json = getattr(args, "payload_json", None) or "{}"
     if getattr(args, "payload_json_file", None):
         payload_json = read_text_file(args.payload_json_file)
-    if not isinstance(json.loads(payload_json), dict):
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise KaizenDenied(
+            "DENIED_JSON_INVALID",
+            {"required_action": "--payload-json must contain a JSON object"},
+            exit_code=2,
+        ) from error
+    if not isinstance(payload, dict):
         raise KaizenDenied(
             "DENIED_PAYLOAD_TYPE",
             {"required_action": "--payload-json must be a JSON object"},
@@ -129,7 +156,8 @@ def add_proposal(args: Any) -> dict[str, Any]:
 
     record_id = new_id("ip")
     created = now()
-    content_hash = utc_text_hash({"id": record_id, **proposal})
+    status = getattr(args, "status", None) or "proposed"
+    content_hash = utc_text_hash({"id": record_id, **proposal, "status": status, "payload_json": payload_json})
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
@@ -140,7 +168,7 @@ def add_proposal(args: Any) -> dict[str, Any]:
                 record_id,
                 created,
                 contract,
-                getattr(args, "status", None) or "proposed",
+                status,
                 title,
                 summary,
                 body,
@@ -248,18 +276,17 @@ def lab_evaluate(args: Any) -> dict[str, Any]:
             if judged["verdict"]["score"] is not None:
                 scores.append(judged["verdict"]["score"])
             usage = judged["usage"]
-            agg["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-            agg["completion_tokens"] += int(usage.get("completion_tokens") or 0)
-            agg["total_tokens"] += int(usage.get("total_tokens") or 0)
+            agg["prompt_tokens"] += _usage_count(usage, "prompt_tokens")
+            agg["completion_tokens"] += _usage_count(usage, "completion_tokens")
+            agg["total_tokens"] += _usage_count(usage, "total_tokens")
             agg["latency_ms"] += judged["latency_ms"]
             agg["raw"].append(judged["raw_text"])
         mean = round(sum(scores) / len(scores), 4) if scores else None
-        summary = f"O4 advisory judge of a proposal over {len(cases)} eval case(s); mean={mean}."
+        summary = f"O4 advisory judge of a proposal over {len(scores)} scored eval case(s); mean={mean}."
         judged_agg = {
             "usage": {k: agg[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")},
             "latency_ms": agg["latency_ms"],
             "raw_text": "\n---\n".join(agg["raw"]),
-            "model": backend.model,
         }
         is_test = 1 if getattr(args, "test", False) else 0
         trace_event_id = _record_judge_trace(
@@ -279,7 +306,7 @@ def lab_evaluate(args: Any) -> dict[str, Any]:
                 "value": value,
                 "data_type": data_type,
                 "source": "model",
-                "comment": f"contract={contract}"[:200],
+                "comment": f"contract={contract}",
             },
             is_test=is_test,
         )

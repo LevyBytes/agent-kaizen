@@ -27,6 +27,9 @@ AK_NO_DEV_TOOLS="${AK_NO_DEV_TOOLS:-0}"
 AK_WITH_RUST="${AK_WITH_RUST:-}"
 AK_WITH_NODE="${AK_WITH_NODE:-}"
 AK_WITH_CMAKE="${AK_WITH_CMAKE:-}"
+# Provider runtime selection is independent of the optional developer-tool menu. The approved
+# environment form is normalized after argv parsing so the CLI flag has higher precedence.
+AK_WITH_CLAUDE_RUNTIME="${AK_WITH_CLAUDE_RUNTIME:-0}"
 TOOL_RUST=0
 TOOL_NODE=0
 TOOL_CMAKE=0
@@ -76,6 +79,7 @@ Options:
   --with-rust                install Rust + C build toolchain (to build Turso from source)
   --with-node                install Node.js
   --with-cmake               install CMake
+  --with-claude-runtime      install the pinned Claude subscription provider runtime (requires DEVROOT-local Node)
 USAGE
 }
 
@@ -101,6 +105,7 @@ while [ $# -gt 0 ]; do
     --with-rust) AK_WITH_RUST=1 ;;
     --with-node) AK_WITH_NODE=1 ;;
     --with-cmake) AK_WITH_CMAKE=1 ;;
+    --with-claude-runtime) AK_WITH_CLAUDE_RUNTIME=1 ;;
     -h|--help) usage; exit 0 ;;
     -* ) printf 'unknown arg: %s\n' "$1" >&2; usage >&2; exit 64 ;;
     * ) if [ -z "$DEVROOT_ARG" ]; then DEVROOT_ARG="$1"; else printf 'unexpected arg: %s\n' "$1" >&2; exit 64; fi ;;
@@ -133,10 +138,21 @@ fi
 validate_devroot "$DEVROOT"
 LOG_ROOT="$DEVROOT/agent-kaizen-setup/logs"
 
+# Escape backslashes and quotes for installer-controlled JSON string values; callers reject unsafe path/name control characters.
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 have_cc() { have cc || have gcc || have clang; }
 die() { printf 'ERROR: %s\n' "$1" >&2; exit "${2:-1}"; }
+
+normalize_bool() {
+  # Approved setup booleans are deliberately explicit; typos fail instead of silently enabling.
+  case "$2" in
+    1|true|enabled) printf '1' ;;
+    0|false|disabled|"") printf '0' ;;
+    *) die "invalid $1 boolean '$2' (expected 1/true/enabled or 0/false/disabled)" 64 ;;
+  esac
+}
+AK_WITH_CLAUDE_RUNTIME="$(normalize_bool AK_WITH_CLAUDE_RUNTIME "$AK_WITH_CLAUDE_RUNTIME")"
 
 # The project name becomes a folder + workspace-file name; keep it to safe path/JSON characters.
 case "$REPO_NAME" in
@@ -155,6 +171,7 @@ show_plan() {
   printf '  DEVROOT: %s\n' "$DEVROOT"
   printf '  Source : %s\n' "$REPO_URL"
   [ -z "$REF" ] || printf '  Ref    : %s\n' "$REF"
+  printf '  Claude : %s\n' "$([ "$AK_WITH_CLAUDE_RUNTIME" -eq 1 ] && printf selected || printf not-selected)"
   printf '  Logs   : %s\n\n' "$LOG_ROOT"
   printf 'Planned setup steps:\n'
   local total="${#STEPS[@]}" i entry name from to
@@ -179,6 +196,8 @@ write_plan_json() {
     printf '  "logRoot": "%s",\n' "$(json_escape "$LOG_ROOT")"
     printf '  "planOnly": %s,\n' "$([ "$AK_PLAN_ONLY" -eq 1 ] && printf true || printf false)"
     printf '  "selfTest": %s,\n' "$([ "$AK_SELF_TEST" -eq 1 ] && printf true || printf false)"
+    printf '  "selection": {"claudeRuntime": %s},\n' \
+      "$([ "$AK_WITH_CLAUDE_RUNTIME" -eq 1 ] && printf true || printf false)"
     printf '  "safety": {"noNetwork": %s, "noExternalActions": %s, "noUserEnvWrites": %s, "noInput": %s},\n' \
       "$([ "$AK_NO_NETWORK" -eq 1 ] && printf true || printf false)" \
       "$([ "$AK_NO_EXTERNAL" -eq 1 ] && printf true || printf false)" \
@@ -230,6 +249,7 @@ assert_network() {
   fi
 }
 
+# Run argv in a background child, log stdout/stderr and timestamps, show progress, and return the child's exit code; accepts optional `--note TEXT`.
 run_cmd() {
   local note=""
   if [ "${1:-}" = "--note" ]; then note="${2:-}"; shift 2; fi
@@ -255,8 +275,7 @@ run_cmd() {
     fi
     sleep 1
   done
-  wait "$pid"
-  rc=$?
+  if wait "$pid"; then rc=0; else rc=$?; fi
   printf '\nFINISHED: %s\nEXIT CODE: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$rc" >> "$log"
   [ "$AK_NO_PROGRESS" -eq 1 ] || printf '\n' >&2
   if [ "$rc" -ne 0 ]; then
@@ -267,6 +286,7 @@ run_cmd() {
   printf '    command completed successfully. Log: %s\n' "$log"
 }
 
+# Resolve a step id, update progress state, and execute argv unless plan-only or self-test mode suppresses external work.
 run_step() {
   local id="$1" name="$2"
   shift 2
@@ -290,6 +310,7 @@ run_step() {
   progress "$step" "$step" "OK" "$name"
 }
 
+# Set global SUDO to empty for root or `sudo` when available; return 1 without setting it when elevation is unavailable.
 need_sudo() {
   if [ "$(id -u)" -eq 0 ]; then SUDO=""; return 0; fi
   if have sudo; then SUDO="sudo"; return 0; fi
@@ -411,6 +432,7 @@ resolve_tool() {
 select_dev_tools() {
   # Interactive optional-dependency menu (mirrors the Windows dev-tool selection). The core install
   # -- git, Python, venv, and Turso from its prebuilt wheel -- is automatic and not asked about.
+  printf 'Claude subscription runtime: %s\n' "$([ "$AK_WITH_CLAUDE_RUNTIME" -eq 1 ] && printf selected || printf not-selected)"
   if [ "$AK_NO_DEV_TOOLS" -eq 1 ]; then
     printf 'Optional-dependency menu disabled (--no-dev-tools); installing the core only.\n'
     return 0
@@ -523,6 +545,7 @@ step_handoff() {
   [ "$AK_NO_USER_ENV" -eq 0 ] || args+=("--no-user-env-writes")
   [ "$AK_ASSUME_YES" -eq 0 ] || args+=("--assume-yes")
   [ "$AK_NO_INPUT" -eq 0 ] || args+=("--no-input")
+  [ "$AK_WITH_CLAUDE_RUNTIME" -eq 0 ] || args+=("--with-claude-runtime")
   # Pass the resolved Rust/toolchain choice to the repo-local engine (drives its rust + deps steps).
   export AK_TOOL_RUST="$TOOL_RUST"
   export AK_PROJECT_NAME="$REPO_NAME"
@@ -539,7 +562,7 @@ detect_source_project() {
   # Echo the path of a properly git-backed agent-kaizen under DEVROOT (ANY folder name, e.g. a renamed
   # install), else nothing. A duplicated project is skipped: it has no .git and a symlinked kaizen.py.
   local p
-  for p in "$DEVROOT/agent-kaizen" "$DEVROOT"/*/; do
+  for p in "$DEVROOT"/*/; do
     p="${p%/}"
     if [ -d "$p/.git" ] && [ -f "$p/kaizen.py" ] && [ ! -L "$p/kaizen.py" ] && [ -d "$p/kaizen_components" ]; then
       printf '%s' "$p"; return 0
@@ -629,7 +652,7 @@ step_dup_create() {
   if [ -e "$tgt" ] && [ -n "$(ls -A "$tgt" 2>/dev/null)" ]; then die "target already exists and is non-empty: $tgt" 64; fi
   mkdir -p "$tgt"
   for item in "${DUP_LINK_ITEMS[@]}"; do
-    if [ -e "$src/$item" ]; then [ -e "$tgt/$item" ] || ln -s "$src/$item" "$tgt/$item"; printf '  link : %s\n' "$item"; fi
+    if [ -e "$src/$item" ] && [ ! -e "$tgt/$item" ]; then ln -s "$src/$item" "$tgt/$item"; printf '  link : %s\n' "$item"; fi
   done
   for item in "${DUP_COPY_ITEMS[@]}"; do
     if [ -e "$src/$item" ]; then cp -r "$src/$item" "$tgt/$item"; printf '  copy : %s\n' "$item"; fi
@@ -647,6 +670,7 @@ step_dup_venv() {
     else
       mkdir -p "$DEVROOT/Python/venvs"
       run_cmd --note "Creating a separate venv for the new project." python3 -m venv "$DUP_VENV"
+      assert_network "new-venv dependency installation"
       run_cmd --note "Upgrading pip in the new venv." "$DUP_VENV/bin/python" -m pip install --upgrade pip
       run_cmd --note "Installing pinned dependencies into the new venv (wheel-only)." "$DUP_VENV/bin/python" -m pip install --only-binary=:all: -r "$AK_SOURCE_PROJECT/requirements-kaizen.txt"
     fi
@@ -680,7 +704,7 @@ step_dup_skills() {
   local store="$DEVROOT/SKILLS/skills"
   mkdir -p "$store" "$tgt/.agents/skills" "$tgt/.claude/skills"
   local -a names=() urls=() want=()
-  if [ "$AK_NO_INPUT" -eq 0 ] && [ -t 0 ]; then
+  if [ "$AK_NO_INPUT" -eq 0 ] && [ "$AK_NO_NETWORK" -eq 0 ] && [ "$AK_NO_EXTERNAL" -eq 0 ] && [ -t 0 ]; then
     local list
     list="$("$DUP_VENV/bin/python" - <<'PY' 2>/dev/null
 import json,re,sys,urllib.request
@@ -705,7 +729,10 @@ PY
     # Fall back to whatever is already in the shared store if GitHub gave nothing.
     if [ "${#names[@]}" -eq 0 ]; then
       local d
-      for d in "$store"/*/; do [ -d "$d" ] || continue; names+=("$(basename "$d")"); urls+=(""); done
+      for d in "$store"/*/; do
+        [ -d "$d" ] || continue
+        names+=("$(basename "$d")"); urls+=("")
+      done
     fi
     if [ "${#names[@]}" -gt 0 ]; then
       printf '\nSkills ([*] = already in the shared store, links with no download):\n' >&2
@@ -726,23 +753,28 @@ PY
            done ;;
       esac
       # Clone any selected skill not yet in the shared store (one store serves all projects).
-      for i in "${want[@]}"; do
-        if [ ! -d "$store/${names[$i]}" ] && [ -n "${urls[$i]}" ]; then
-          run_cmd --note "Cloning skill ${names[$i]} into the shared store." git clone --depth 1 "${urls[$i]}" "$store/${names[$i]}" || true
-        fi
-      done
+      if [ "${#want[@]}" -gt 0 ]; then
+        for i in "${want[@]}"; do
+          if [ ! -d "$store/${names[$i]}" ] && [ -n "${urls[$i]}" ]; then
+            assert_network "clone skill ${names[$i]}"
+            run_cmd --note "Cloning skill ${names[$i]} into the shared store." git clone --depth 1 "${urls[$i]}" "$store/${names[$i]}" || true
+          fi
+        done
+      fi
     fi
   fi
   # Link the selected skills into the new project's mirrors.
   local i n m linked=0
-  for i in "${want[@]}"; do
-    n="${names[$i]}"
-    [ -d "$store/$n" ] && [ -f "$store/$n/SKILL.md" ] || continue
-    for m in "$tgt/.agents/skills" "$tgt/.claude/skills"; do
-      [ -e "$m/$n" ] || ln -s "$store/$n" "$m/$n"
+  if [ "${#want[@]}" -gt 0 ]; then
+    for i in "${want[@]}"; do
+      n="${names[$i]}"
+      [ -d "$store/$n" ] && [ -f "$store/$n/SKILL.md" ] || continue
+      for m in "$tgt/.agents/skills" "$tgt/.claude/skills"; do
+        [ -e "$m/$n" ] || ln -s "$store/$n" "$m/$n"
+      done
+      linked=$((linked + 1)); printf '  linked: %s\n' "$n"
     done
-    linked=$((linked + 1)); printf '  linked: %s\n' "$n"
-  done
+  fi
   printf '%d skill(s) linked into the new project (shared store: %s).\n' "$linked" "$store"
 }
 

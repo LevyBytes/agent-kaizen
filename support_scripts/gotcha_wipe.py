@@ -54,6 +54,7 @@ def repo_root() -> Path:
 
 
 def _git_lines(root: Path, args: list) -> list:
+    """Run a Git query, returning lines (or NUL fields for ``-z``) and [] on failure."""
     out = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
     if out.returncode != 0:
         return []
@@ -69,10 +70,15 @@ def tracked_gotchas(root: Path) -> list:
 def worktree_gotchas(root: Path) -> list:
     """Repo-relative POSIX paths of every GOTCHA.md on disk (pruning .git/node_modules/etc., perm-safe)."""
     found = []
+    resolved_root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
         dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
         if GOTCHA_NAME in filenames:
-            found.append((Path(dirpath) / GOTCHA_NAME).resolve().relative_to(root).as_posix())
+            try:
+                rel = (Path(dirpath) / GOTCHA_NAME).resolve().relative_to(resolved_root).as_posix()
+            except ValueError:
+                continue
+            found.append(rel)
     return sorted(found)
 
 
@@ -114,12 +120,14 @@ def h1_line(text: str) -> str:
 
 
 def make_stub(title: str, ts: str, backup_rel: str | None) -> bytes:
+    """Build the cleared stub with a timestamp and optional restore hint."""
     restore = (f"restore: python support_scripts/gotcha_wipe.py restore {backup_rel}"
                if backup_rel else "no backup was taken")
     return f"{title}\n\n<!-- cleared by gotcha_wipe.py on {ts}; {restore} -->\n".encode("utf-8")
 
 
 def now_stamp() -> tuple:
+    """Return compact directory and ISO-8601 UTC timestamps."""
     dt = datetime.now(timezone.utc)
     return dt.strftime("%Y%m%dT%H%M%SZ"), dt.isoformat()
 
@@ -129,6 +137,7 @@ def default_backup_root(root: Path) -> Path:
 
 
 def confirm(action: str, n: int, yes: bool) -> bool:
+    """Confirm an action; require exact ``yes`` and reject non-TTY input unless pre-approved."""
     if yes:
         return True
     if not sys.stdin.isatty():
@@ -153,17 +162,26 @@ def group_summary(rels: list) -> str:
 # --------------------------------------------------------------------------- backup / digest
 
 def normalize_rule(line: str) -> str:
+    """Strip a bullet prefix and collapse whitespace to form a rule-deduplication key."""
     return " ".join(line.strip().lstrip("-").strip().split())
 
 
 def write_backup(root: Path, rels: list, backup_root: Path, dir_stamp: str, iso: str, scope: dict) -> Path:
+    """Write a repo-confined manifest/digest, rejecting missing or non-UTF-8 target files."""
     bdir = assert_inside(root, backup_root / dir_stamp)
     bdir.mkdir(parents=True, exist_ok=True)
     files = []
     for rel in rels:
-        raw = read_bytes(root, rel)
+        try:
+            raw = read_bytes(root, rel)
+        except OSError as exc:
+            raise SystemExit(f"cannot back up {rel}: {exc}") from exc
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SystemExit(f"cannot back up non-UTF-8 GOTCHA file {rel}: {exc}") from exc
         files.append({"path": rel, "sha256": hashlib.sha256(raw).hexdigest(),
-                      "bytes": len(raw), "content": raw.decode("utf-8")})
+                      "bytes": len(raw), "content": content})
     manifest = {"tool": "gotcha_wipe.py", "created": iso, "repo_root": root.name,
                 "scope": scope, "count": len(files), "files": files}
     (bdir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
@@ -217,6 +235,7 @@ def build_digest(files: list, iso: str) -> str:
 # --------------------------------------------------------------------------- commands
 
 def cmd_wipe(args) -> int:
+    """Back up and clear the selected GOTCHA files; return 0 on success/preview or 1 on abort."""
     root = repo_root()
     rels = discover(root, args.include_ignored, args.exclude or [])
     scope = {"include_ignored": bool(args.include_ignored), "exclude": args.exclude or [], "count": len(rels)}
@@ -239,9 +258,9 @@ def cmd_wipe(args) -> int:
         return 0
 
     # git-dirty warning (the outer git rollback won't fully cover already-modified targets).
-    dirty = [ln[3:] for ln in _git_lines(root, ["status", "--porcelain", "--", *rels]) if ln]
+    dirty = _git_lines(root, ["status", "--porcelain", "-z", "--", *rels])
     if dirty:
-        print(f"  WARNING: {len(dirty)} target(s) have uncommitted git changes; the backup still captures them.",
+        print("  WARNING: one or more targets have uncommitted git changes; the backup still captures them.",
               file=sys.stderr)
 
     if not confirm("WIPE", len(rels), args.yes):
@@ -265,11 +284,12 @@ def cmd_wipe(args) -> int:
         target.write_bytes(make_stub(title, iso, backup_rel))
     result["status"] = "wiped"
     result["wiped"] = len(rels)
-    print(json.dumps(result, indent=2) if args.json else f"wiped {len(rels)} file(s).", file=sys.stderr if not args.json else sys.stdout)
+    print(json.dumps(result, indent=2) if args.json else f"wiped {len(rels)} file(s).")
     return 0
 
 
 def cmd_restore(args) -> int:
+    """Restore manifest entries byte-for-byte; warn and continue on post-write hash mismatches."""
     root = repo_root()
     src = Path(args.backup).resolve()
     manifest_path = src if src.is_file() else src / "manifest.json"
@@ -296,11 +316,13 @@ def cmd_restore(args) -> int:
 
     restored, mism = 0, []
     for e in entries:
+        if Path(e["path"]).name != GOTCHA_NAME:
+            sys.exit(f"refusing non-{GOTCHA_NAME} manifest entry: {e['path']}")
         target = assert_inside(root, root / e["path"])
         target.parent.mkdir(parents=True, exist_ok=True)
         data = e["content"].encode("utf-8")
         target.write_bytes(data)
-        if "sha256" in e and hashlib.sha256(data).hexdigest() != e["sha256"]:
+        if "sha256" in e and hashlib.sha256(target.read_bytes()).hexdigest() != e["sha256"]:
             mism.append(e["path"])
         restored += 1
     result["status"] = "restored"
@@ -314,6 +336,7 @@ def cmd_restore(args) -> int:
 
 
 def cmd_list(args) -> int:
+    """List readable backup manifests, silently skipping malformed entries."""
     root = repo_root()
     broot = Path(args.backup_dir).resolve() if args.backup_dir else default_backup_root(root)
     backups = []

@@ -17,14 +17,14 @@ The method above is fully specified, so the numbers are reproducible: embed each
 | `granite-embedding-311m-multilingual-r2` | 768 | **0.7081** | 0.3113 | 0.3947 | 0.4714 |
 | `F2LLM-v2-1.7B` — no prompt | 2048 | 0.6573 | 0.3239 | 0.4763 | 0.4858 |
 | **`F2LLM-v2-1.7B` — with query instruction** | 2048 | 0.6700 | **0.3635** | **0.5218** | **0.5184** |
-| `F2LLM-v2-1.7B` — instruction, truncated to 768 | 768 | 0.6468 | 0.3573 | 0.5177 | 0.5060 |
+| `F2LLM-v2-1.7B` — instruction, truncated to 768 | 768 | 0.6468 | 0.3573 | 0.5177 | 0.5073 |
 
 Δ NDCG@10 vs `granite` (F2LLM with its instruction): **SciFact -0.038, NFCorpus +0.052, FiQA +0.127, mean +0.047.**
 
 ## Why F2LLM was chosen
 
 - **Better retriever on balance.** It wins two of three sets and is **+0.047 NDCG@10 on average**, decisively so on FiQA (**+0.127**). Even without its prompt it edges granite on average.
-- **The query instruction earns the lead** (+0.013→+0.046 over no-prompt per set), so the backend now applies it automatically to `E4` queries — without it, F2LLM would actually *lose* on SciFact.
+- **The query instruction strengthens the lead** (+0.013/+0.040/+0.046 on SciFact/NFCorpus/FiQA over no-prompt), so the backend now applies it automatically to `E4` queries — without it, F2LLM's mean lead shrinks to +0.014 and its SciFact gap widens.
 - **Clears the same gates as granite:** apache-2.0, fresh (F2LLM 2026-03, granite 2026-04), multilingual (~80 languages), clean `sentence-transformers` load (no `trust_remote_code`), fits the 12 GB budget (~3.4 GB).
 
 The result is **domain-dependent**, and the doc is honest about it: `granite` wins **SciFact** (scientific-claim retrieval), where a compact ModernBERT bi-encoder is very strong. F2LLM wins the Q&A-style tasks that better match general evidence retrieval.
@@ -37,6 +37,6 @@ The result is **domain-dependent**, and the doc is honest about it: `granite` wi
 KAIZEN_EMBED_MODEL=ibm-granite/granite-embedding-311m-multilingual-r2
 ```
 
-Prefer it when your corpus is scientific/claim-style, or when you want a much lighter footprint: **~0.62 GB vs ~3.4 GB**, **768-dim vs 2048-dim** (≈2.7× smaller vector store and faster ANN), and no query prompt to manage.
+Prefer it when your corpus is scientific/claim-style, or when you want a much lighter footprint: **~0.62 GB vs ~3.4 GB**, **768-dim vs 2048-dim** (≈2.7× smaller vectors and faster ANN), and no query prompt to manage.
 
 Switching or upgrading the embedder is a **rolling, reversible re-index**, not a blocking re-vector: embeddings are model-specific, so Kaizen keeps a separate index per model and ranks against a single active one. `B3 --model <new>` builds the new index in the background while the old one keeps serving, `B7 --activate --model <new>` flips retrieval once it fully covers the corpus, and `B7 --activate --model <old>` rolls back instantly (the previous index is retained; see [`setup/PYTORCH.md`](../setup/PYTORCH.md)). Until the active model is indexed, `E4 --semantic` denies with `DENIED_EMBED_INDEX_ABSENT`.

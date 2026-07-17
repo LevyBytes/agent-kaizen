@@ -9,21 +9,31 @@ fresh, permissive ModernBERT cross-encoder; scoring is deterministic per model+v
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ..denials import KaizenDenied
 
-_DEFAULT_MODEL = "cross-encoder/ettin-reranker-150m-v1"  # apache-2.0, ModernBERT, ~7999-token ctx
+_DEFAULT_MODEL = "cross-encoder/ettin-reranker-150m-v1"  # apache-2.0, ModernBERT, 8192-token context
 
 
 class CrossEncoderRerankBackend:
-    name = "sentence-transformers"
+    """Provider, `RerankBackend` protocol, opt-in reranker."""
+    name = "cross-encoder"
 
     def __init__(self, *, model: str | None = None) -> None:
         self.model = model or _DEFAULT_MODEL
         self._encoder: Any = None
+        self._load_lock = threading.Lock()
 
     def _load(self) -> Any:
+        if self._encoder is not None:
+            return self._encoder
+        with self._load_lock:
+            return self._load_locked()
+
+    def _load_locked(self) -> Any:
+        """Load exactly once while _load_lock is held."""
         if self._encoder is not None:
             return self._encoder
         from ..quiet import quiet_stderr
@@ -58,7 +68,7 @@ class CrossEncoderRerankBackend:
         return self._encoder
 
     def rank(self, query: str, passages: list[str]) -> list[float]:
-        """Return one relevance score per passage (higher = more relevant), order preserved."""
+        """Return one score per passage; the tokenizer truncates inputs at its context limit."""
         if not passages:
             return []
         encoder = self._load()
@@ -66,5 +76,6 @@ class CrossEncoderRerankBackend:
         return [float(score) for score in scores]
 
     def probe(self) -> dict[str, Any]:
+        """Note it round-trips real inference to surface load/download denials early and returns a capability descriptor."""
         self.rank("probe", ["hello world"])
         return {"backend": self.name, "kind": "rerank", "model": self.model, "in_process": True}

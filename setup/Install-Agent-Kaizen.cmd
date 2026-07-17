@@ -13,6 +13,7 @@ REM  Usage:
 REM    Install-Agent-Kaizen.cmd [DEVROOT] [-Ref <git-tag>] [-NoPrompt] [-NoPause]
 REM    Install-Agent-Kaizen.cmd X:\dev -NoPause
 REM    Install-Agent-Kaizen.cmd X:\dev -PlanOnly -NoNetwork -NoExternalActions
+REM    Install-Agent-Kaizen.cmd X:\dev -WithClaudeRuntime
 REM
 REM  Automation flags (-SelfTest / -PlanOnly / -ListSteps / -NoPrompt /
 REM  -NoNetwork / -NoExternalActions) run the payload inline in the current
@@ -37,15 +38,10 @@ if errorlevel 1 (
 )
 
 REM Non-interactive / automation modes run inline (this console, no elevation,
-REM no new window) so CI, self-test, and plan-only stay headless.
-for %%A in (%*) do (
-  if /I "%%~A"=="-SelfTest" set "AK_INLINE=1"
-  if /I "%%~A"=="-ListSteps" set "AK_INLINE=1"
-  if /I "%%~A"=="-PlanOnly" set "AK_INLINE=1"
-  if /I "%%~A"=="-NoPrompt" set "AK_INLINE=1"
-  if /I "%%~A"=="-NoNetwork" set "AK_INLINE=1"
-  if /I "%%~A"=="-NoExternalActions" set "AK_INLINE=1"
-)
+REM no new window) so CI, self-test, and plan-only stay headless. Inspect the
+REM raw command line without asking cmd.exe to re-parse metacharacters in it.
+powershell.exe -NoProfile -NonInteractive -Command "if($env:AK_PASSTHRU -match '(?i)(?:^|\s|\x22)-(?:SelfTest|ListSteps|PlanOnly|NoPrompt|NoNetwork|NoExternalActions)(?=$|\s|=|\x22)'){exit 0};exit 1"
+if not errorlevel 1 set "AK_INLINE=1"
 
 echo Preparing Agent Kaizen setup...
 call :ExtractPayload
@@ -66,16 +62,16 @@ del "%AK_PAYLOAD%" >nul 2>nul
 endlocal & exit /b %AK_EXIT%
 
 :RunElevated
-REM Interactive install: relaunch the payload in an ELEVATED PowerShell console
-REM window via UAC. That window owns the DEVROOT menu, every install step, and
-REM the closing pause; the payload deletes its own temp file when it finishes.
-REM This launcher window closes as soon as the elevated window starts.
+REM Interactive install: let the typed PowerShell payload bind the original argv,
+REM normalize its bound parameters, and relaunch itself via UAC without forwarding
+REM cmd.exe's raw command-line string. The elevated payload deletes itself at exit.
 echo Launching Agent Kaizen setup in an elevated PowerShell window...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$q=[char]34; $a='-NoProfile -ExecutionPolicy Bypass -File '+$q+$env:AK_PAYLOAD+$q; if(-not [string]::IsNullOrWhiteSpace($env:AK_PASSTHRU)){ $a=$a+' '+$env:AK_PASSTHRU }; Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $a"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%AK_PAYLOAD%" %*
 if errorlevel 1 (
   echo.
   echo Could not start the elevated PowerShell installer. If a User Account
   echo Control prompt appeared and was declined, rerun and choose Yes.
+  del "%AK_PAYLOAD%" >nul 2>nul
   endlocal & exit /b 1
 )
 endlocal & exit /b 0
@@ -110,6 +106,7 @@ param(
     [switch] $WithDotNet,
     [switch] $WithCMake,
     [switch] $WithNode,
+    [switch] $WithClaudeRuntime,
     [switch] $WithVSCode,
     [switch] $NoDevTools,
     [string] $PyTursoWheelUrl,
@@ -118,10 +115,67 @@ param(
     [string] $NewVenv
 )
 
+function ConvertTo-AkElevationToken {
+    param([Parameter(Mandatory)][string] $Value)
+    if ($Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function Test-AkAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+$automationMode = $SelfTest -or $PlanOnly -or $ListSteps -or $NoPrompt -or $NoNetwork -or $NoExternalActions
+if (-not $automationMode -and -not (Test-AkAdministrator)) {
+    $elevationArgs = New-Object System.Collections.Generic.List[string]
+    foreach ($token in @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-AkElevationToken $PSCommandPath))) { $elevationArgs.Add($token) }
+    foreach ($name in @($PSBoundParameters.Keys | Sort-Object)) {
+        $value = $PSBoundParameters[$name]
+        if ($value -is [Management.Automation.SwitchParameter]) {
+            if ([bool]$value) { $elevationArgs.Add("-$name") }
+            continue
+        }
+        $elevationArgs.Add("-$name")
+        $elevationArgs.Add((ConvertTo-AkElevationToken ([string]$value)))
+    }
+    try {
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList ($elevationArgs -join ' ')
+        exit 0
+    } catch {
+        try { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
+        Write-Error ("Could not start the elevated PowerShell installer: {0}" -f $_.Exception.Message)
+        exit 1
+    }
+}
+
 # -ProjectName is a friendlier alias for the project/folder name; it wins when both are given.
 if (-not [string]::IsNullOrWhiteSpace($ProjectName)) { $RepoName = $ProjectName }
 
 $ErrorActionPreference = 'Stop'
+$script:ClaudeRuntimeSelected = $false
+$script:ClaudeRuntimeSelectionSource = 'default'
+if ($PSBoundParameters.ContainsKey('WithClaudeRuntime')) {
+    $script:ClaudeRuntimeSelected = [bool]$WithClaudeRuntime
+    $script:ClaudeRuntimeSelectionSource = 'cli'
+} else {
+    $claudeRuntimeEnv = [Environment]::GetEnvironmentVariable('AK_WITH_CLAUDE_RUNTIME', 'Process')
+    if ($null -ne $claudeRuntimeEnv) {
+        switch ($claudeRuntimeEnv.Trim().ToLowerInvariant()) {
+            '1' { $script:ClaudeRuntimeSelected = $true }
+            'true' { $script:ClaudeRuntimeSelected = $true }
+            'enabled' { $script:ClaudeRuntimeSelected = $true }
+            '0' { $script:ClaudeRuntimeSelected = $false }
+            'false' { $script:ClaudeRuntimeSelected = $false }
+            'disabled' { $script:ClaudeRuntimeSelected = $false }
+            default { throw 'AK_WITH_CLAUDE_RUNTIME must be one of: 1, true, enabled, 0, false, disabled.' }
+        }
+        $script:ClaudeRuntimeSelectionSource = 'environment'
+    }
+}
 # Suppress the built-in Write-Progress banner globally. Add-AppxPackage (winget/appx bootstrap) and
 # Expand-Archive (CMake/VS Code/Node) otherwise render a flashing, offset, stale-record sticky banner
 # (an epilepsy hazard). The installer's own [n/N] Write-Host step + download output is unaffected.
@@ -208,6 +262,7 @@ $script:Steps = @(
     [pscustomobject]@{ Id = 'dotnet'; Name = 'Optional: install .NET SDKs (8 and 9)' },
     [pscustomobject]@{ Id = 'cmake'; Name = 'Optional: install CMake' },
     [pscustomobject]@{ Id = 'node'; Name = 'Optional: install Node.js' },
+    [pscustomobject]@{ Id = 'claude-runtime'; Name = 'Optional: install or validate Claude provider runtime' },
     [pscustomobject]@{ Id = 'vscode'; Name = 'Optional: install VS Code' }
 )
 
@@ -228,6 +283,7 @@ $script:BannerName = ''
 $script:BannerActivity = ''
 $script:BannerLastPaintTicks = 0
 $script:BannerLastActivityPct = -1
+$script:RequestedDevRoot = $DevRoot
 $script:DevRoot = $null
 $script:RepoPath = $null
 $script:VenvRoot = $null
@@ -304,7 +360,11 @@ function Write-Utf8IfChanged {
     # files (or trigger editor/watch events) for identical output.
     param([Parameter(Mandatory)][string] $Path, [Parameter(Mandatory)][string] $Content)
     if (Test-Path -LiteralPath $Path) {
-        try { if ([IO.File]::ReadAllText($Path, (New-Object System.Text.UTF8Encoding($false))) -ceq $Content) { return } } catch {}
+        try {
+            $current = [IO.File]::ReadAllText($Path, (New-Object System.Text.UTF8Encoding($false)))
+            if ($current.Length -gt 0 -and $current[0] -eq [char]0xFEFF) { $current = $current.Substring(1) }
+            if ($current -ceq $Content) { return }
+        } catch {}
     }
     Write-Utf8NoBom -Path $Path -Content $Content
 }
@@ -332,7 +392,7 @@ function Start-AkTranscriptAndEnvironment {
     if (-not (Test-Path -LiteralPath $script:LogRoot)) {
         New-Item -ItemType Directory -Path $script:LogRoot -Force | Out-Null
     }
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $stamp = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PID
     $script:TranscriptLogPath = Join-Path $script:LogRoot ("setup-$stamp-transcript.log")
     $script:SupportBundlePath = Join-Path $script:LogRoot ("support-$stamp.txt")
     Write-Utf8NoBom -Path $script:SupportBundlePath -Content ("Agent Kaizen setup support bundle`r`nCreated: {0}`r`nDEVROOT: {1}`r`nLogs: {2}`r`n" -f (Get-Date).ToString('s'), $script:DevRoot, $script:LogRoot)
@@ -409,11 +469,14 @@ function Write-AkPackageInventory {
 }
 
 function Get-AkActivityIdFromText {
+    # Return the first labelled AppX ActivityId GUID, else the first bare GUID, or null when absent.
     param([string] $Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
     $guid = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-    if ($Text -match ("(?i)ActivityId[^\r\n]*?(" + $guid + ")")) { return [string]$matches[1] }
-    if ($Text -match $guid) { return [string]$matches[0] }
+    $labelled = [regex]::Match($Text, ("(?i)ActivityId[^\r\n]*?(" + $guid + ")"))
+    if ($labelled.Success) { return [string]$labelled.Groups[1].Value }
+    $bare = [regex]::Match($Text, $guid)
+    if ($bare.Success) { return [string]$bare.Value }
     return $null
 }
 
@@ -533,6 +596,7 @@ function Resolve-AkFullPath {
 }
 
 function Test-AkPathUnder {
+    # Return true when normalized Path equals or is nested under Parent, using a case-insensitive component boundary; blank Parent returns false.
     param(
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][string] $Parent
@@ -562,6 +626,12 @@ function Resolve-AkValidatedDevRoot {
     foreach ($protectedRoot in $protectedRoots) {
         if (Test-AkPathUnder -Path $full -Parent $protectedRoot) {
             throw "DEVROOT must not be inside a protected system folder: $protectedRoot"
+        }
+    }
+    $exactProtectedRoots = @((Join-Path $env:SystemDrive 'Users'), $env:ProgramData) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($protectedRoot in $exactProtectedRoots) {
+        if ($full.Equals((Resolve-AkFullPath $protectedRoot).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "DEVROOT must not be the shared system-data root: $protectedRoot"
         }
     }
     return $full
@@ -635,8 +705,8 @@ function Read-AkDevRootMenu {
 }
 
 function Resolve-AkDevRoot {
-    if ($DevRoot) {
-        return (Resolve-AkValidatedDevRoot $DevRoot)
+    if ($script:RequestedDevRoot) {
+        return (Resolve-AkValidatedDevRoot $script:RequestedDevRoot)
     }
     if ($env:DEVROOT) {
         return (Resolve-AkValidatedDevRoot $env:DEVROOT)
@@ -781,9 +851,15 @@ function Write-AkBanner {
     try {
         $raw = $Host.UI.RawUI
         $old = $raw.CursorPosition
+        $windowTop = $raw.WindowPosition.Y
+        $windowBottom = $windowTop + $raw.WindowSize.Height - 1
+        if ($script:BannerTop -lt $windowTop -or ($script:BannerTop + $script:BannerHeight - 1) -gt $windowBottom) {
+            $script:BannerEnabled = $false
+            return
+        }
         $target = $old
         $target.X = 0
-        $target.Y = [int][Math]::Max($script:BannerTop, $raw.WindowPosition.Y)
+        $target.Y = $script:BannerTop
         $raw.CursorPosition = $target
         for ($i = 0; $i -lt $script:BannerHeight; $i++) {
             $text = if ($i -lt $lines.Count) { $lines[$i] } else { '' }
@@ -835,6 +911,7 @@ function Show-AkPlan {
     Write-Host ("  Repo    : {0}" -f $script:RepoPath)
     Write-Host ("  Venv    : {0}" -f $script:VenvRoot)
     Write-Host ("  Logs    : {0}" -f $script:LogRoot)
+    Write-Host ("  Claude runtime: {0} ({1})" -f $(if ($script:ClaudeRuntimeSelected) { 'selected' } else { 'off' }), $script:ClaudeRuntimeSelectionSource)
     if ($RepoSource) { Write-Host ("  Source  : {0}" -f $RepoSource) }
     if ($Ref) { Write-Host ("  Ref     : {0}" -f $Ref) }
     Write-Host ''
@@ -859,6 +936,9 @@ function Write-AkPlanJson {
         ref = $Ref
         planOnly = [bool]$PlanOnly
         selfTest = [bool]$SelfTest
+        selection = [ordered]@{
+            claudeRuntime = [bool]$script:ClaudeRuntimeSelected
+        }
         safety = [ordered]@{
             noNetwork = [bool]$NoNetwork
             noExternalActions = [bool]$NoExternalActions
@@ -971,6 +1051,7 @@ function Invoke-AkStep {
 }
 
 function Quote-NativeArg {
+    # Apply Windows CommandLineToArgvW-compatible backslash/quote escaping to one joinable token; null or empty becomes `""`.
     param([object] $Value)
     if ($null -eq $Value) { return '""' }
     $s = [string]$Value
@@ -982,6 +1063,7 @@ function Quote-NativeArg {
 }
 
 function Join-NativeCommandLine {
+    # Build a command line for logging and Start-Process -ArgumentList; the result is not cmd.exe /c shell syntax.
     param([Parameter(Mandatory)][string] $FilePath, [string[]] $ArgumentList = @())
     $parts = New-Object System.Collections.Generic.List[string]
     $parts.Add((Quote-NativeArg $FilePath))
@@ -1010,7 +1092,21 @@ function Get-ShortNativeLine {
     return $clean
 }
 
+function Get-AkLastCompleteLine {
+    # Return the final newline-terminated line while ignoring a child process's partial write.
+    param([Parameter(Mandatory)][string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    try { $text = [IO.File]::ReadAllText($Path) } catch { return '' }
+    $end = $text.LastIndexOf("`n", [StringComparison]::Ordinal)
+    if ($end -lt 0) { return '' }
+    $complete = $text.Substring(0, $end).TrimEnd([char[]]"`r`n")
+    if ($complete.Length -eq 0) { return '' }
+    $start = $complete.LastIndexOf("`n", [StringComparison]::Ordinal)
+    return $complete.Substring($start + 1).TrimEnd([char[]]"`r")
+}
+
 function Invoke-Native {
+    # Run a native process with redirected temp streams and live tail, log final status, return the log path, and throw on nonzero; 9999 means no trustworthy child exit code was captured.
     param(
         [Parameter(Mandatory)][string] $FilePath,
         [string[]] $ArgumentList = @(),
@@ -1061,12 +1157,12 @@ function Invoke-Native {
             try { $proc.Refresh() } catch {}
             try {
                 if (Test-Path -LiteralPath $stdout) {
-                    $tail = @(Get-Content -LiteralPath $stdout -Tail 1 -ErrorAction SilentlyContinue)
-                    if ($tail.Count -gt 0) { $lastLine = [string]$tail[$tail.Count - 1] }
+                    $completeLine = Get-AkLastCompleteLine -Path $stdout
+                    if (-not [string]::IsNullOrWhiteSpace($completeLine)) { $lastLine = $completeLine }
                 }
                 if ([string]::IsNullOrWhiteSpace($lastLine) -and (Test-Path -LiteralPath $stderr)) {
-                    $tailErr = @(Get-Content -LiteralPath $stderr -Tail 1 -ErrorAction SilentlyContinue)
-                    if ($tailErr.Count -gt 0) { $lastLine = [string]$tailErr[$tailErr.Count - 1] }
+                    $completeError = Get-AkLastCompleteLine -Path $stderr
+                    if (-not [string]::IsNullOrWhiteSpace($completeError)) { $lastLine = $completeError }
                 }
             } catch {}
             if (-not $NoProgressHeader) {
@@ -1152,13 +1248,7 @@ function Invoke-Native {
 }
 
 function Invoke-AkInstaller {
-    # Job-based installer runner, mirroring the SC installer's Invoke-LoggedCommandJob. Invoke-Native
-    # launches with Start-Process -NoNewWindow and redirected std handles, which makes WiX-burn
-    # bootstrappers (python.org, VS Build Tools) hand off to a child and return in ~1s with exit 0
-    # while nothing installs. Running the .exe with the call operator inside a background job (SC's
-    # proven path) keeps it in-process so it returns its REAL exit code. Returns the exit code and
-    # never throws on non-zero: the caller validates the result on disk (3010 = reboot-pending and
-    # other non-zero codes can still leave a working install).
+    # Run installers through an in-process background-job call operator so child bootstrap work remains attached and reports its real exit code. Child stdout/stderr are merged into one log and tailed for progress. The function never throws on nonzero; callers validate on disk because codes such as 3010 can still leave a usable install. Sentinel 9999 means no trustworthy exit code was captured.
     param(
         [Parameter(Mandatory)][string] $FilePath,
         [string[]] $ArgumentList = @(),
@@ -1175,7 +1265,7 @@ function Invoke-AkInstaller {
     $script:LastActivityNote = $Note
 
     $start = Get-Date
-    $header = "COMMAND: {0}`r`nSTARTED: {1}`r`nNOTE: {2}`r`nRUNNER: Start-Job call operator (in-process, inherited handles).`r`n`r`n" -f $commandLine, $start.ToString('s'), $Note
+    $header = "COMMAND: {0}`r`nSTARTED: {1}`r`nNOTE: {2}`r`nRUNNER: Start-Job call operator (in-process; merged stdout/stderr).`r`nSENTINEL EXIT CODE: 9999`r`n`r`n" -f $commandLine, $start.ToString('s'), $Note
     Write-Utf8NoBom -Path $log -Content $header
 
     $exitFile = "$log.exit"
@@ -1198,12 +1288,17 @@ function Invoke-AkInstaller {
     } -ArgumentList $FilePath, ([string[]]$ArgumentList), $log, $exitFile
 
     $frames = @('|', '/', '-', '\')
+    $lastLine = $Note
     while ((Get-Job -Id $job.Id).State -eq 'Running') {
         Start-Sleep -Milliseconds 900
+        try {
+            $completeLine = Get-AkLastCompleteLine -Path $log
+            if (-not [string]::IsNullOrWhiteSpace($completeLine)) { $lastLine = $completeLine }
+        } catch {}
         if (-not $NoProgressHeader) {
             $elapsed = (Get-Date) - $start
             $frame = $frames[[int]($elapsed.TotalSeconds) % $frames.Count]
-            Write-Host -NoNewline ("`r[{0}] step {1}/{2} elapsed {3:hh\:mm\:ss} {4,-64}" -f $frame, $script:CurrentStep, $script:Steps.Count, $elapsed, (Get-ShortNativeLine $Note))
+            Write-Host -NoNewline ("`r[{0}] step {1}/{2} elapsed {3:hh\:mm\:ss} {4,-64}" -f $frame, $script:CurrentStep, $script:Steps.Count, $elapsed, (Get-ShortNativeLine $lastLine))
         }
     }
     Wait-Job -Job $job | Out-Null
@@ -1232,6 +1327,7 @@ function Invoke-AkInstaller {
 }
 
 function Test-AkDownloadedFile {
+    # Validate two-byte package magic plus a coarse size floor, deleting and rejecting an invalid cache; this is not a hash/authenticity check.
     param(
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][ValidateSet('zip', 'exe')][string] $Kind,
@@ -1256,6 +1352,7 @@ function Test-AkDownloadedFile {
 }
 
 function Invoke-AkDownload {
+    # Reuse a validated warm cache, stream a network response to a truncated destination, enforce Content-Length when supplied, and apply optional package magic/size validation.
     param(
         [Parameter(Mandatory)][string] $Uri,
         [Parameter(Mandatory)][string] $OutFile,
@@ -1280,6 +1377,8 @@ function Invoke-AkDownload {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
 
+    $total = [int64]-1
+    $downloaded = [int64]0
     $request = [Net.HttpWebRequest]::Create($Uri)
     $request.UserAgent = 'AgentKaizenInstaller/1.0'
     $response = $request.GetResponse()
@@ -1289,7 +1388,6 @@ function Invoke-AkDownload {
         $outputStream = [IO.File]::Open($OutFile, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try {
             $buffer = New-Object byte[] (1024 * 512)
-            $downloaded = [int64]0
             $start = Get-Date
             while ($true) {
                 $read = $inputStream.Read($buffer, 0, $buffer.Length)
@@ -1314,7 +1412,6 @@ function Invoke-AkDownload {
                 }
             }
             if (-not $NoProgressHeader -and -not $script:BannerEnabled) { Write-Host '' }
-            Write-Ok "$Label downloaded: $OutFile"
         } finally {
             $outputStream.Dispose()
             $inputStream.Dispose()
@@ -1322,7 +1419,24 @@ function Invoke-AkDownload {
     } finally {
         $response.Dispose()
     }
+    if ($total -gt 0 -and $downloaded -ne $total) {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        throw ("Incomplete {0}: received {1} of {2} bytes from {3}. The partial file was deleted; rerun to retry." -f $Label, $downloaded, $total, $Uri)
+    }
+    Write-Ok "$Label downloaded: $OutFile"
     if ($Verify) { Test-AkDownloadedFile -Path $OutFile -Kind $Verify -Uri $Uri -MinimumBytes $MinimumBytes }
+}
+
+function Assert-AkPowerShellBootstrap {
+    # Reject truncated or non-script bootstrap content before ExecutionPolicy Bypass; this is a structural sentinel check, not cryptographic authenticity proof.
+    param([Parameter(Mandatory)][string] $Path, [string] $Label = 'PowerShell bootstrap')
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label was not downloaded: $Path" }
+    $content = [IO.File]::ReadAllText($Path)
+    $valid = ($content.Length -ge 20KB -and $content.StartsWith('# Copyright (c) .NET Foundation and contributors. All rights reserved.') -and $content.Contains('[cmdletbinding()]') -and $content.Contains('param('))
+    if (-not $valid) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        throw "$Label failed structural validation and was deleted: $Path"
+    }
 }
 
 function Update-ProcessPath {
@@ -1342,8 +1456,10 @@ function Test-IsAdmin {
 }
 
 function Get-AkCpuArch {
-    if ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') { return 'arm64' }
-    if ($env:PROCESSOR_ARCHITECTURE -match '86') { return 'x86' }
+    # Map the native OS architecture to arm64/x86/x64; WOW64 exposes the native value through PROCESSOR_ARCHITEW6432.
+    $architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    if ($architecture -match 'ARM64') { return 'arm64' }
+    if ($architecture -match '86') { return 'x86' }
     return 'x64'
 }
 
@@ -1515,10 +1631,10 @@ function Get-LatestWinGetBundleUri {
 }
 
 function Install-WinGetDirect {
-    # Last-resort winget bootstrap, matching the SC installer's Try-DirectWinGetPackageInstall:
+    # Last-resort winget bootstrap:
     # download the Desktop VCLibs + UI.Xaml deps and the App Installer bundle, install the deps
     # best-effort (soft-fail), then the bundle. This runs only when registration + Repair both fail;
-    # in the owner's sandbox the App Installer is already present, so registration alone works.
+    # in a warm sandbox the App Installer may already be present, so registration alone can work.
     Assert-NetworkAllowed 'direct App Installer package download'
     Assert-ExternalAllowed 'direct App Installer package install'
     $downloadRoot = Join-Path $script:WorkRoot 'downloads\winget'
@@ -1751,7 +1867,7 @@ function Resolve-RealPython {
 }
 
 function Get-PythonInstallerUri {
-    # Official python.org Windows installer, matching the SC installer's approach.
+    # Official python.org Windows installer.
     $v = $script:PinnedPythonVersion
     switch (Get-AkCpuArch) {
         'arm64' { return "https://www.python.org/ftp/python/$v/python-$v-arm64.exe" }
@@ -1770,13 +1886,12 @@ function Install-PythonDirect {
     $uri = Get-PythonInstallerUri
     $installerPath = Join-Path $downloadRoot ([IO.Path]::GetFileName(([Uri]$uri).LocalPath))
     Invoke-AkDownload -Uri $uri -OutFile $installerPath -Label ("Python {0}" -f $script:PinnedPythonVersion) -Verify exe -MinimumBytes 10MB
-    # Install into an explicit DEVROOT target (SC's Install-PythonIntoDevRoot approach): per-user,
-    # no admin, PrependPath=0 (we point $script:Python directly and Resolve-RealPython finds it).
+    # Install into an explicit per-user DEVROOT target with PrependPath=0; the installer resolves this managed interpreter directly.
     # python.org's .exe is a WiX-burn bootstrapper, so run it through the job-based runner (not
     # Invoke-Native) and pass /log so a sandbox MSI failure (e.g. exit 2147946951) writes a legible
     # diagnostic that AK_LOG_MIRROR ships to the host instead of a 1-second no-op.
     New-Item -ItemType Directory -Path $script:LogRoot -Force | Out-Null
-    $installLog = Join-Path $script:LogRoot ('python-install-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $installLog = Join-Path $script:LogRoot ('python-install-{0}-{1}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PID)
     $exitCode = Invoke-AkInstaller -FilePath $installerPath -ArgumentList @('/quiet', '/log', $installLog, 'InstallAllUsers=0', "TargetDir=$target", 'Include_pip=1', 'Include_launcher=1', 'InstallLauncherAllUsers=0', 'PrependPath=0', 'Include_test=0', 'Shortcuts=0') -Network -Note "Installing Python into $target (python.org installer)."
     if ($exitCode -eq 3010) { Write-Info 'Python installer reported reboot-pending (3010); validating on disk.' }
     Update-ProcessPath
@@ -1797,7 +1912,7 @@ function Install-PythonDirect {
 
 function Ensure-Python {
     # Python is installed from the python.org Windows installer into an explicit DEVROOT target,
-    # exactly like the SC installer. No winget, no nuget.
+    # without winget or NuGet.
     $python = Resolve-RealPython
     if (-not $python) {
         if ($NoNetwork) {
@@ -1848,11 +1963,15 @@ function Test-AkTursoSatisfied {
 function Select-AkDevTools {
     if ($NoDevTools) {
         Write-Info 'Developer tool installs disabled (-NoDevTools). Turso then needs a prebuilt wheel.'
+        if ($script:ClaudeRuntimeSelected) {
+            $script:ToolNode = $true
+            Write-Info 'Claude provider runtime remains selected and requires managed Node.js.'
+        }
         return
     }
     # -AssumeYes only auto-picks DEVROOT; it does NOT suppress this menu. Only -NoPrompt / explicit
     # -With* flags make this non-interactive.
-    $scripted = $NoPrompt -or $WithRust -or $WithBuildTools -or $WithDotNet -or $WithCMake -or $WithNode -or $WithVSCode
+    $scripted = $NoPrompt -or $WithRust -or $WithBuildTools -or $WithDotNet -or $WithCMake -or $WithNode -or $script:ClaudeRuntimeSelected -or $WithVSCode
 
     if ($scripted) {
         if ($WithRust -or $WithBuildTools) {
@@ -1891,6 +2010,8 @@ function Select-AkDevTools {
         $script:ToolNode = Read-AkYesNo -Prompt '  Install Node.js?' -Default $false
     }
 
+    if ($script:ClaudeRuntimeSelected) { $script:ToolNode = $true }
+
     $selected = New-Object System.Collections.Generic.List[string]
     if ($script:ToolRust) { $selected.Add('Rust') }
     if ($script:ToolBuildTools) { $selected.Add('BuildTools') }
@@ -1907,7 +2028,7 @@ function Select-AkDevTools {
 function Add-AkPathEntry {
     param([Parameter(Mandatory)][string] $Dir)
     if (-not (Test-Path -LiteralPath $Dir)) { return }
-    if ($env:Path -notlike "*$Dir*") { $env:Path = "$Dir;$env:Path" }
+    if (($env:Path -split ';') -notcontains $Dir) { $env:Path = "$Dir;$env:Path" }
     if (-not $NoUserEnvWrites) {
         try {
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -1921,9 +2042,7 @@ function Add-AkPathEntry {
 }
 
 function Set-AkNpmGlobalPrefix {
-    # Point npm's global prefix at a DEVROOT dir and put it on PATH (SC's pattern) so `npm i -g`
-    # tools are reachable. Only touches AK-managed Node (guarded on npm.cmd under NodeRoot); never a
-    # user's system npm.
+    # Point npm's global prefix at a DEVROOT directory and put it on PATH so global tools are reachable; only the AK-managed npm.cmd is modified.
     if ([string]::IsNullOrWhiteSpace($script:NpmGlobalDir)) { return }
     New-Item -ItemType Directory -Path $script:NpmGlobalDir -Force | Out-Null
     Add-AkPathEntry $script:NpmGlobalDir
@@ -1980,7 +2099,7 @@ function Ensure-Rust {
             [Environment]::SetEnvironmentVariable('RUSTUP_HOME', $env:RUSTUP_HOME, 'User')
         } catch {}
     }
-    # Primary: winget (SC's method). Fallback: rustup-init direct if winget is unavailable.
+    # Primary: winget. Fallback: rustup-init direct when winget is unavailable.
     $installed = $false
     if ($script:Winget) {
         try {
@@ -2068,7 +2187,7 @@ function Ensure-BuildTools {
         Write-Warn "VS Build Tools installer returned an error (3010 = reboot pending); revalidating anyway: $($_.Exception.Message)"
     }
     # The bootstrapper can return before helper processes finish writing files; re-detect the fresh
-    # instance a few times (SC's pattern) instead of failing immediately.
+    # instance a few times instead of failing immediately.
     for ($i = 0; $i -lt 3; $i++) {
         $devshell = Get-AkVsDevShell
         if ($devshell) { break }
@@ -2117,6 +2236,13 @@ function Ensure-DotNet {
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
     $installScript = Join-Path $downloadRoot 'dotnet-install.ps1'
     Invoke-AkDownload -Uri $script:PinnedDotNetInstallScriptUri -OutFile $installScript -Label 'dotnet-install.ps1'
+    try {
+        Assert-AkPowerShellBootstrap -Path $installScript -Label 'dotnet-install.ps1'
+    } catch {
+        Write-Warn $_.Exception.Message
+        Invoke-AkDownload -Uri $script:PinnedDotNetInstallScriptUri -OutFile $installScript -Label 'dotnet-install.ps1' -Force
+        Assert-AkPowerShellBootstrap -Path $installScript -Label 'dotnet-install.ps1'
+    }
     foreach ($channel in @('8.0', '9.0')) {
         Invoke-Native -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installScript, '-Channel', $channel, '-InstallDir', $script:DotNetRoot, '-NoPath') -Network -Note ("Installing .NET SDK {0}." -f $channel)
     }
@@ -2154,15 +2280,54 @@ function Ensure-CMake {
     Write-Ok "CMake installed: $script:CMakeRoot"
 }
 
+function Test-AkManagedNodeTools {
+    try {
+        if (-not (Test-AkPathUnder -Path $script:NodeRoot -Parent $script:DevRoot)) { return $false }
+        $cursor = (Resolve-AkFullPath $script:NodeRoot).TrimEnd('\')
+        $boundary = (Resolve-AkFullPath $script:DevRoot).TrimEnd('\')
+        while ($true) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+            if ($cursor.Equals($boundary, [StringComparison]::OrdinalIgnoreCase)) { break }
+            $parent = Split-Path -Parent $cursor
+            if ([string]::IsNullOrWhiteSpace($parent) -or $parent.Equals($cursor, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+            $cursor = $parent.TrimEnd('\')
+        }
+    } catch { return $false }
+    foreach ($path in @((Join-Path $script:NodeRoot 'node.exe'), (Join-Path $script:NodeRoot 'npm.cmd'))) {
+        try {
+            $tool = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if ($tool.PSIsContainer -or ($tool.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+        } catch { return $false }
+    }
+    return $true
+}
+
 function Ensure-Node {
     if (-not $script:ToolNode) { Set-AkStepSkipped 'not selected'; return }
-    $existing = Get-Command node -ErrorAction SilentlyContinue
-    if ($existing) { Add-AkPathEntry $script:NodeRoot; Add-AkPathEntry $script:NpmGlobalDir; Write-Ok "Node.js already available: $($existing.Source)"; return }
-    if ($NoNetwork) { Write-Warn 'Node.js not installed and -NoNetwork blocks installing it; skipping.'; return }
+    if (Test-AkManagedNodeTools) {
+        Add-AkPathEntry $script:NodeRoot
+        Set-AkNpmGlobalPrefix
+        Write-Ok "Managed Node.js already available: $script:NodeRoot"
+        return
+    }
+    if (-not $script:ClaudeRuntimeSelected) {
+        $existing = Get-Command node -ErrorAction SilentlyContinue
+        if ($existing) { Write-Ok "Node.js already available: $($existing.Source)"; return }
+    }
+    if ($NoNetwork) {
+        if ($script:ClaudeRuntimeSelected) {
+            throw "Claude provider runtime requires exact managed node.exe and npm.cmd under $script:NodeRoot, and -NoNetwork blocks installing Node.js."
+        }
+        Write-Warn 'Node.js not installed and -NoNetwork blocks installing it; skipping.'
+        return
+    }
     Assert-NetworkAllowed 'Node.js download'
     Assert-ExternalAllowed 'Node.js install'
     $v = $script:PinnedNodeVersion
-    $uri = "https://nodejs.org/dist/v$v/node-v$v-win-x64.zip"
+    $nodeArch = Get-AkCpuArch
+    if ($nodeArch -ne 'x64' -and $nodeArch -ne 'arm64') { throw "Managed Node.js supports Windows x64 and arm64, not $nodeArch." }
+    $uri = "https://nodejs.org/dist/v$v/node-v$v-win-$nodeArch.zip"
     $downloadRoot = Join-Path $script:WorkRoot 'downloads\node'
     New-Item -ItemType Directory -Path $downloadRoot -Force | Out-Null
     $zip = Join-Path $downloadRoot "node-$v.zip"
@@ -2174,9 +2339,32 @@ function Ensure-Node {
     if (-not $nodeDir) { throw "node.exe not found in the extracted Node.js archive." }
     if (Test-Path -LiteralPath $script:NodeRoot) { Remove-Item -LiteralPath $script:NodeRoot -Recurse -Force -ErrorAction SilentlyContinue }
     Move-Item -LiteralPath $nodeDir -Destination $script:NodeRoot -Force
+    if (-not (Test-AkManagedNodeTools)) { throw "Managed node.exe/npm.cmd pair was not installed under $script:NodeRoot." }
     Add-AkPathEntry $script:NodeRoot
     Set-AkNpmGlobalPrefix
     Write-Ok "Node.js installed: $script:NodeRoot"
+}
+
+function Test-AkClaudeRuntimeReady {
+    # Run the repo helper's offline check through shared-venv Python; return true only on exit 0 and throw when the helper or interpreter is absent.
+    $helper = Join-Path $script:RepoPath 'setup\claude_runtime_setup.py'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw "Missing Claude runtime setup helper: $helper" }
+    if (-not (Test-Path -LiteralPath $script:VenvPython -PathType Leaf)) { throw "Missing shared venv Python: $script:VenvPython" }
+    $argv = @($helper, 'check')
+    Assert-ExternalAllowed (Join-NativeCommandLine $script:VenvPython $argv)
+    & $script:VenvPython @argv
+    $exitCode = $LASTEXITCODE
+    return ($exitCode -eq 0)
+}
+
+function Ensure-AkClaudeRuntime {
+    if (-not $script:ClaudeRuntimeSelected) { Set-AkStepSkipped 'not selected'; return }
+    if (Test-AkClaudeRuntimeReady) { Write-Ok 'Claude provider runtime is already installed and valid.'; return }
+    if ($NoNetwork) { throw 'Claude provider runtime is not ready, and -NoNetwork blocks its installation.' }
+    $helper = Join-Path $script:RepoPath 'setup\claude_runtime_setup.py'
+    Invoke-Native -FilePath $script:VenvPython -ArgumentList @($helper, 'install') -Network -WorkingDirectory $script:RepoPath -Note 'Install the pinned Claude provider runtime from the audited lock.' | Out-Null
+    if (-not (Test-AkClaudeRuntimeReady)) { throw 'Claude provider runtime install completed but offline validation failed.' }
+    Write-Ok 'Claude provider runtime installed and validated.'
 }
 
 function Test-NetworkRepoSource {
@@ -2275,8 +2463,8 @@ function Step-Repo {
     if (Test-Path -LiteralPath $script:RepoPath) {
         throw "Target repository folder exists but is not a git repository: $script:RepoPath"
     }
-    $args = @('clone', $source, $script:RepoPath)
-    Invoke-Native -FilePath $script:Git -ArgumentList $args -Network:(Test-NetworkRepoSource $source) -Note 'Clone Agent Kaizen repository.'
+    $cloneArgs = @('clone', $source, $script:RepoPath)
+    Invoke-Native -FilePath $script:Git -ArgumentList $cloneArgs -Network:(Test-NetworkRepoSource $source) -Note 'Clone Agent Kaizen repository.'
     if ($Ref) {
         Invoke-Native -FilePath $script:Git -ArgumentList @('-C', $script:RepoPath, 'checkout', $Ref) -Note 'Check out requested Agent Kaizen ref.'
     }
@@ -2382,7 +2570,7 @@ function Step-Dependencies {
 function Get-AkAvailableSkills {
     # Live-enumerate the owner's published skill repos: LevyBytes/AI-skill-drafting + AI-SKILL-*.
     # Map each repo to its skill folder name (strip the AI-SKILL- / AI- prefix): AI-SKILL-git -> git,
-    # AI-skill-drafting -> skill-drafting. -creplace is case-sensitive so the two forms do not collide.
+    # AI-skill-drafting -> skill-drafting. -creplace is case-sensitive so the two forms do not collide. Network/safety/API failures throw; callers must catch.
     Assert-NetworkAllowed 'GitHub skill repo enumeration'
     $repos = Invoke-RestMethod -Uri 'https://api.github.com/users/LevyBytes/repos?per_page=100&type=public' -Headers @{ 'User-Agent' = 'AgentKaizenInstaller'; 'Accept' = 'application/vnd.github+json' } -ErrorAction Stop
     $skills = New-Object System.Collections.Generic.List[object]
@@ -2400,7 +2588,7 @@ function Invoke-AkSkillsInto {
     # Optional, best-effort: never throw. Ask which published skills to install (skill-drafting always),
     # clone each into DEVROOT\SKILLS\skills\<name>, and junction it into the given project's
     # .agents\skills + .claude\skills. Headless/-NoPrompt installs skill-drafting only. Shared by the
-    # normal skills step and the duplication flow.
+    # normal skills step and the duplication flow; NoNetwork/NoExternalActions skip before discovery.
     param([Parameter(Mandatory)][string] $RepoPath, [string] $VenvPython)
     try {
         $store = Join-Path $script:DevRoot 'SKILLS'
@@ -2505,20 +2693,27 @@ function Read-AkProjectName {
         $ans = ([string](Read-Host ($Prompt + $suffix))).Trim()
         if (-not $ans) { $ans = $Default }
         if (-not $ans) { Write-Host '  A name is required.' -ForegroundColor Yellow; continue }
-        if ($ans -notmatch '^[A-Za-z0-9._-]+$') { Write-Host '  Use letters, digits, dot, dash, underscore only.' -ForegroundColor Yellow; continue }
+        if ($ans -notmatch '^[A-Za-z0-9._-]+$' -or $ans -match '^\.+$') { Write-Host '  Use letters, digits, dot, dash, underscore only; dot-only names are invalid.' -ForegroundColor Yellow; continue }
         return $ans
     }
 }
 
 function New-AkLink {
-    # Junction directories (no elevation); symlink files (needs the installer's elevation), else copy.
+    # Create a directory junction or file symlink and return its mode; a file-symlink failure falls back to an explicit warned copy so callers can report loss of the shared-codebase contract.
     param([Parameter(Mandatory)][string] $Target, [Parameter(Mandatory)][string] $LinkPath)
-    if (Test-Path -LiteralPath $LinkPath) { return }
+    if (Test-Path -LiteralPath $LinkPath) { return 'existing' }
     if (Test-Path -LiteralPath $Target -PathType Container) {
         New-Item -ItemType Junction -Path $LinkPath -Target $Target | Out-Null
+        return 'junction'
     } else {
-        try { New-Item -ItemType SymbolicLink -Path $LinkPath -Target $Target -ErrorAction Stop | Out-Null }
-        catch { Copy-Item -LiteralPath $Target -Destination $LinkPath -Force }
+        try {
+            New-Item -ItemType SymbolicLink -Path $LinkPath -Target $Target -ErrorAction Stop | Out-Null
+            return 'symlink'
+        } catch {
+            Copy-Item -LiteralPath $Target -Destination $LinkPath -Force
+            Write-Warn "File link unavailable; copied instead and future source replacements will not propagate: $LinkPath"
+            return 'copy'
+        }
     }
 }
 
@@ -2573,11 +2768,42 @@ function Resolve-AkProjectMode {
     }
 }
 
+function Write-AkWorkspaceArtifacts {
+    # Write the shared workspace template and canonical launcher for a project; return whether a Visual Studio developer shell was embedded.
+    param(
+        [Parameter(Mandatory)][string] $RepoPath,
+        [Parameter(Mandatory)][string] $ProjectName,
+        [Parameter(Mandatory)][string] $WorkspaceLabel,
+        [Parameter(Mandatory)][string] $VenvName,
+        [switch] $RefreshVs
+    )
+    $workspaceDir = Join-Path $RepoPath '_workspace'
+    New-Item -ItemType Directory -Path $workspaceDir -Force | Out-Null
+    $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule))
+    if ($RefreshVs -and -not $hasVs) {
+        try { $null = Get-AkVsDevShell } catch {}
+        $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule))
+    }
+    $devShellPrefix = ''
+    if ($hasVs) {
+        $dllJson = $script:VsDevShellModule.Replace('\', '\\')
+        $rootJson = $script:VsInstallPath.Replace('\', '\\')
+        $devShellPrefix = "Import-Module '$dllJson'; Enter-VsDevShell -VsInstallPath '$rootJson' -SkipAutomaticLocation -Arch amd64 -HostArch amd64; "
+    }
+    $workspaceFile = "$ProjectName-tools.code-workspace"
+    $workspaceContent = $WorkspaceJson.Replace('__AK_DEVSHELL_PREFIX__', $devShellPrefix).Replace('__AK_WS_LABEL__', $WorkspaceLabel).Replace('__AK_VENV_NAME__', $VenvName)
+    $launcherContent = $LauncherCmd.Replace('__AK_WS_FILE__', $workspaceFile)
+    Write-Utf8IfChanged -Path (Join-Path $workspaceDir $workspaceFile) -Content ($workspaceContent + [Environment]::NewLine)
+    Write-Utf8IfChanged -Path (Join-Path $RepoPath "open-$ProjectName-vscode.cmd") -Content ($launcherContent + [Environment]::NewLine)
+    return [pscustomobject]@{ HasVs = [bool]$hasVs; WorkspaceDir = $workspaceDir; WorkspaceFile = $workspaceFile }
+}
+
 function Invoke-AkDuplication {
+    # Build a new project with linked shared engine entries, copied customizable configuration, its own KAIZEN_REPO_ROOT database, and an optional separate venv; inline modes may lack file-symlink privilege and report any copy fallback.
     $src = $script:SourceProject
     $name = $script:DuplicateName
     if ([string]::IsNullOrWhiteSpace($name)) { throw 'Duplication requires a project name.' }
-    if ($name -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid project name: $name" }
+    if ($name -notmatch '^[A-Za-z0-9._-]+$' -or $name -match '^\.+$') { throw "Invalid project name: $name" }
     if (-not $src -or -not (Test-Path -LiteralPath (Join-Path $src 'kaizen.py'))) { throw 'No source Agent Kaizen project to duplicate from.' }
     $tgt = Join-Path $script:DevRoot $name
     if ((Test-Path -LiteralPath $tgt) -and (Get-ChildItem -LiteralPath $tgt -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
@@ -2588,9 +2814,14 @@ function Invoke-AkDuplication {
     New-Item -ItemType Directory -Path $tgt -Force | Out-Null
 
     # Linked (shared codebase) vs copied (customizable, per-project) -- same layout, never a blanket copy.
+    $copiedEngineItems = New-Object System.Collections.Generic.List[string]
     foreach ($it in @('kaizen.py', 'kaizen_components', 'support_scripts', 'prompt-builder-scripts', 'requirements-kaizen.txt', 'Kaizen_System.md')) {
         $s = Join-Path $src $it
-        if (Test-Path -LiteralPath $s) { New-AkLink -Target $s -LinkPath (Join-Path $tgt $it); Write-Host "  link : $it" }
+        if (Test-Path -LiteralPath $s) {
+            $mode = New-AkLink -Target $s -LinkPath (Join-Path $tgt $it)
+            if ($mode -eq 'copy') { [void]$copiedEngineItems.Add($it) }
+            Write-Host ("  {0,-8}: {1}" -f $mode, $it)
+        }
     }
     foreach ($it in @('AGENTS.md', 'CLAUDE.md', 'README.md', 'setup', 'evals', 'docs', 'LICENSE', '.gitignore', '.gitattributes', '.prettierrc.json', '.prettierignore')) {
         $s = Join-Path $src $it
@@ -2607,8 +2838,8 @@ function Invoke-AkDuplication {
         $nvPy = Join-Path $nvRoot 'Scripts\python.exe'
         if (-not (Test-Path -LiteralPath $nvPy)) {
             Invoke-Native -FilePath $script:VenvPython -ArgumentList @('-m', 'venv', $nvRoot) -Note "Create a separate venv for $name."
-            Invoke-Native -FilePath $nvPy -ArgumentList @('-m', 'pip', 'install', '--upgrade', 'pip') -Note 'Upgrade pip in the new venv.'
-            Invoke-Native -FilePath $nvPy -ArgumentList @('-m', 'pip', 'install', '-r', (Join-Path $src 'requirements-kaizen.txt')) -WorkingDirectory $tgt -Note 'Install dependencies into the new venv.'
+            Invoke-Native -FilePath $nvPy -ArgumentList @('-m', 'pip', 'install', '--upgrade', 'pip') -Note 'Upgrade pip in the new venv.' -Network
+            Invoke-Native -FilePath $nvPy -ArgumentList @('-m', 'pip', 'install', '-r', (Join-Path $src 'requirements-kaizen.txt')) -WorkingDirectory $tgt -Note 'Install dependencies into the new venv.' -Network
         }
         $venvPy = $nvPy
     }
@@ -2629,28 +2860,17 @@ function Invoke-AkDuplication {
     # Skills into the new project (shared store; download-if-missing + link) via the shared impl.
     Invoke-AkSkillsInto -RepoPath $tgt -VenvPython $venvPy
 
-    # Workspace + launcher (absolute interpreter; terminal env sets KAIZEN_REPO_ROOT).
-    $wsDir = Join-Path $tgt '_workspace'
-    New-Item -ItemType Directory -Path $wsDir -Force | Out-Null
-    # Reuse the SAME workspace template as a normal install so the Developer PowerShell profile + venv
-    # activation load identically (the custom variant did not). The template's terminal env sets
-    # KAIZEN_REPO_ROOT to the workspace folder, isolating this project's DB. Venv name = shared 'kaizen'
-    # or the -NewVenv name; the relative ../Python/venvs/<name> path resolves under DEVROOT either way.
+    # Reuse the normal workspace and launcher writer so profile, venv, root, and current-directory semantics cannot drift.
     $venvName = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $venvPy))
-    $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule))
-    if (-not $hasVs) { try { $null = Get-AkVsDevShell } catch {}; $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule)) }
-    $devShellPrefix = ''
-    if ($hasVs) {
-        $devShellPrefix = "Import-Module '$($script:VsDevShellModule.Replace('\', '\\'))'; Enter-VsDevShell -VsInstallPath '$($script:VsInstallPath.Replace('\', '\\'))' -SkipAutomaticLocation -Arch amd64 -HostArch amd64; "
-    }
-    $wsContent = $WorkspaceJson.Replace('__AK_DEVSHELL_PREFIX__', $devShellPrefix).Replace('__AK_WS_LABEL__', $name).Replace('__AK_VENV_NAME__', $venvName)
-    Write-Utf8IfChanged -Path (Join-Path $wsDir "$name-tools.code-workspace") -Content ($wsContent + [Environment]::NewLine)
-    $launcher = "@echo off`r`nsetlocal`r`ncode `"%~dp0_workspace\$name-tools.code-workspace`"`r`nendlocal`r`n"
-    Write-Utf8IfChanged -Path (Join-Path $tgt "open-$name-vscode.cmd") -Content $launcher
+    $null = Write-AkWorkspaceArtifacts -RepoPath $tgt -ProjectName $name -WorkspaceLabel $name -VenvName $venvName -RefreshVs
 
     Write-Host ''
     Write-Ok "New Agent Kaizen project ready: $tgt"
-    Write-Host ("  Engine : linked from {0} (shared codebase)" -f $src)
+    if ($copiedEngineItems.Count -eq 0) {
+        Write-Host ("  Engine : linked from {0} (shared codebase)" -f $src)
+    } else {
+        Write-Warn ("Engine : mixed links and copies from {0}; copied entries will not track source replacements: {1}" -f $src, ($copiedEngineItems -join ', '))
+    }
     Write-Host ("  Venv   : {0}" -f $venvPy)
     Write-Host ("  DB     : {0}\AI\db\kaizen.db (its own)" -f $tgt)
     Write-Host ("  Run    : {0} K1 --json" -f (Join-Path $tgt 'kaizen.cmd'))
@@ -2658,31 +2878,10 @@ function Invoke-AkDuplication {
 }
 
 function Step-Workspace {
-    $workspaceDir = Join-Path $script:RepoPath '_workspace'
-    New-Item -ItemType Directory -Path $workspaceDir -Force | Out-Null
-
-    # This step runs AFTER Ensure-BuildTools, so the "developer PowerShell" install is done and the
-    # VS instance is known. Fill the workspace profile's __AK_DEVSHELL_PREFIX__ placeholder: enter the
-    # VS Dev env (cl.exe / MSVC on PATH) when VS is present, or leave venv-only (graceful) when it is
-    # not. Paths are JSON-escaped (\\) so the .code-workspace stays valid JSON.
-    # Enter the VS Dev env via the Enter-VsDevShell cmdlet (NOT Launch-VsDevShell.ps1, which exit()s
-    # and would abort the terminal before the venv activates). Paths are JSON-escaped (\\) so the
-    # .code-workspace stays valid JSON.
-    $hasVs = ($script:VsInstallPath -and $script:VsDevShellModule -and (Test-Path -LiteralPath $script:VsDevShellModule))
-    $devShellPrefix = ''
-    if ($hasVs) {
-        $dllJson  = $script:VsDevShellModule.Replace('\', '\\')
-        $rootJson = $script:VsInstallPath.Replace('\', '\\')
-        $devShellPrefix = "Import-Module '$dllJson'; Enter-VsDevShell -VsInstallPath '$rootJson' -SkipAutomaticLocation -Arch amd64 -HostArch amd64; "
-    }
-    # Workspace label + file/launcher names follow the (possibly renamed) project; keep the pretty
-    # "Agent Kaizen" label for the canonical name, use the chosen name otherwise.
+    # The build-tools step has already resolved any Visual Studio developer shell; use the shared writer for the workspace and canonical launcher.
     $wsLabel = if ($RepoName -eq 'agent-kaizen') { 'Agent Kaizen' } else { $RepoName }
-    $wsFile  = "$RepoName-tools.code-workspace"
-    $workspaceContent = $WorkspaceJson.Replace('__AK_DEVSHELL_PREFIX__', $devShellPrefix).Replace('__AK_WS_LABEL__', $wsLabel).Replace('__AK_VENV_NAME__', 'kaizen')
-    $launcherContent  = $LauncherCmd.Replace('__AK_WS_FILE__', $wsFile)
-    Write-Utf8IfChanged -Path (Join-Path $workspaceDir $wsFile) -Content ($workspaceContent + [Environment]::NewLine)
-    Write-Utf8IfChanged -Path (Join-Path $script:RepoPath "open-$RepoName-vscode.cmd") -Content ($launcherContent + [Environment]::NewLine)
+    $workspace = Write-AkWorkspaceArtifacts -RepoPath $script:RepoPath -ProjectName $RepoName -WorkspaceLabel $wsLabel -VenvName 'kaizen'
+    $hasVs = $workspace.HasVs
     New-Item -ItemType Directory -Path (Join-Path $script:DevRoot 'SKILLS\skills') -Force | Out-Null
     # When VS Build Tools were installed, drop a Developer PowerShell launcher that enters the VS
     # dev environment (cl.exe / MSVC on PATH) and activates the shared venv.
@@ -2769,6 +2968,7 @@ try {
         Invoke-AkStep -Id 'dotnet' -Name (Get-AkStepName 'dotnet') -Body { Ensure-DotNet }
         Invoke-AkStep -Id 'cmake' -Name (Get-AkStepName 'cmake') -Body { Ensure-CMake }
         Invoke-AkStep -Id 'node' -Name (Get-AkStepName 'node') -Body { Ensure-Node }
+        Invoke-AkStep -Id 'claude-runtime' -Name (Get-AkStepName 'claude-runtime') -Body { Ensure-AkClaudeRuntime }
         Invoke-AkStep -Id 'vscode' -Name (Get-AkStepName 'vscode') -Body { Ensure-VSCode }
 
         Write-AkBanner -Completed $script:Steps.Count -StepNo $script:Steps.Count -Status 'done' -Name 'Complete' -Activity ''

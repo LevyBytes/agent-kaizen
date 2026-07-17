@@ -24,6 +24,7 @@ _LIFECYCLE_KINDS = {
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of equal-length vectors; returns 0.0 when either norm is zero."""
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(y * y for y in b))
@@ -34,6 +35,7 @@ def _single_link_clusters(vectors: list[list[float]], threshold: float) -> list[
     """Union-find single-link clustering on cosine >= threshold. Returns lists of member indices."""
     n = len(vectors)
     parent = list(range(n))
+    norms = [math.sqrt(sum(value * value for value in vector)) for vector in vectors]
 
     def find(x: int) -> int:
         while parent[x] != x:
@@ -43,7 +45,12 @@ def _single_link_clusters(vectors: list[list[float]], threshold: float) -> list[
 
     for i in range(n):
         for j in range(i + 1, n):
-            if _cosine(vectors[i], vectors[j]) >= threshold:
+            denominator = norms[i] * norms[j]
+            similarity = (
+                sum(x * y for x, y in zip(vectors[i], vectors[j])) / denominator
+                if denominator else 0.0
+            )
+            if similarity >= threshold:
                 ri, rj = find(i), find(j)
                 if ri != rj:
                     parent[ri] = rj
@@ -53,17 +60,22 @@ def _single_link_clusters(vectors: list[list[float]], threshold: float) -> list[
     return [sorted(members) for members in groups.values()]
 
 
-def _same_dim(ids: list, texts: list, vectors: list[list[float]]) -> tuple[list, list, list]:
+def _same_dim(
+    ids: list[str], texts: list[str], vectors: list[list[float]]
+) -> tuple[list[str], list[str], list[list[float]]]:
     """Keep only the most common vector dimension so cosine never zip-truncates across mixed
     embedding models (stored evidence chunks may span embedder revisions)."""
     if not vectors:
         return ids, texts, vectors
-    dim = Counter(len(v) for v in vectors).most_common(1)[0][0]
+    counts = Counter(len(v) for v in vectors)
+    most_common_count = max(counts.values())
+    dim = min(dimension for dimension, count in counts.items() if count == most_common_count)
     keep = [i for i, v in enumerate(vectors) if len(v) == dim]
     return [ids[i] for i in keep], [texts[i] for i in keep], [vectors[i] for i in keep]
 
 
 def cluster_records(args: Any) -> dict[str, Any]:
+    """Cluster records for human triage without mutating them; prefer stored evidence vectors."""
     kind = (getattr(args, "kind", None) or "gotcha").strip().lower()
     if kind not in _LIFECYCLE_KINDS and kind != "evidence":
         raise KaizenDenied(
@@ -71,12 +83,21 @@ def cluster_records(args: Any) -> dict[str, Any]:
             {"kinds": [*_LIFECYCLE_KINDS, "evidence"], "required_action": "pass --kind gotcha|learned|learning|evidence"},
             exit_code=2,
         )
-    limit = int(getattr(args, "limit", None) or 200)
-    threshold = float(getattr(args, "threshold", None) or 0.85)  # cosine SIMILARITY threshold
+    raw_limit = getattr(args, "limit", None)
+    raw_threshold = getattr(args, "threshold", None)
+    limit = int(200 if raw_limit is None else raw_limit)
+    threshold = float(0.85 if raw_threshold is None else raw_threshold)  # cosine SIMILARITY threshold
+    if not 0.0 <= threshold <= 1.0:
+        raise KaizenDenied(
+            "DENIED_DEDUP_THRESHOLD",
+            {"threshold": threshold, "required_action": "pass --threshold between 0 and 1"},
+            exit_code=2,
+        )
 
     backend = get_embedding_backend()
     vectors: list[list[float]] | None = None
     vector_source = "embedded"
+    dropped_dimension_mismatch = 0
 
     if kind == "evidence":
         from .db import get_active_embedding_model
@@ -101,9 +122,18 @@ def cluster_records(args: Any) -> dict[str, Any]:
         if rows:
             ids = [r[0] for r in rows]
             texts = [r[1] or "" for r in rows]
-            vectors = [json.loads(r[2]) for r in rows]
+            try:
+                vectors = [json.loads(r[2]) for r in rows]
+            except (TypeError, json.JSONDecodeError) as error:
+                raise KaizenDenied(
+                    "DENIED_EMBED_MALFORMED",
+                    {"required_action": "rebuild malformed stored evidence embeddings with B3"},
+                    exit_code=1,
+                ) from error
             vector_source = "stored-embeddings"
+            queried_count = len(ids)
             ids, texts, vectors = _same_dim(ids, texts, vectors)
+            dropped_dimension_mismatch = queried_count - len(ids)
         else:
             if backend is None:
                 raise KaizenDenied(
@@ -127,8 +157,15 @@ def cluster_records(args: Any) -> dict[str, Any]:
         texts = [f"{r[1]} {r[2]}".strip() for r in rows]
 
     if len(ids) < 2:
-        return {"status": "OK", "kind": kind, "records": len(ids), "clusters": 0,
-                "source": vector_source, "note": "fewer than 2 records; nothing to cluster."}
+        return {
+            "status": "OK",
+            "kind": kind,
+            "records": len(ids),
+            "clusters": 0,
+            "source": vector_source,
+            "dropped_dimension_mismatch": dropped_dimension_mismatch,
+            "note": "fewer than 2 comparable records; nothing to cluster.",
+        }
 
     if vectors is None:
         # freshly embed (the stored-evidence path skips this, so no model call to trace there)
@@ -176,6 +213,7 @@ def cluster_records(args: Any) -> dict[str, Any]:
         "records": len(ids),
         "clusters": len(clusters),
         "source": vector_source,
+        "dropped_dimension_mismatch": dropped_dimension_mismatch,
         "path": repo_relative(path),
         "sha256": file_sha256(path),
         "top_clusters": [[ids[i] for i in c] for c in clusters[:5]],

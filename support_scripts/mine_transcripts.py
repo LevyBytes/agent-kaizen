@@ -63,6 +63,7 @@ def project_slug(path: Path) -> str:
 
 
 def default_transcript_dir() -> Path | None:
+    """Return this repo's Claude Code transcript directory when it exists."""
     candidate = Path.home() / ".claude" / "projects" / project_slug(REPO_ROOT)
     return candidate if candidate.is_dir() else None
 
@@ -75,7 +76,8 @@ def scrub(text: str) -> str:
 
 def signature(text: str) -> str:
     """Normalize an error/correction line into a groupable signature."""
-    first = scrub(text).strip().splitlines()[0] if text.strip() else ""
+    cleaned = scrub(text).strip()
+    first = cleaned.splitlines()[0] if cleaned else ""
     first = _HEXISH.sub("<hex>", first)
     first = _NUMBERS.sub("#", first)
     return " ".join(first.split())[:160]
@@ -103,6 +105,7 @@ def _walk_tool_errors(node, out: list[str]) -> None:
             text = _text_of(node.get("content"))
             if text.strip():
                 out.append(text)
+            return
         for value in node.values():
             _walk_tool_errors(value, out)
     elif isinstance(node, list):
@@ -133,7 +136,10 @@ def mine_file(path: Path) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]
                 message = obj.get("message") or {}
                 text = _text_of(message.get("content")) if isinstance(message, dict) else ""
                 head = text.strip().lower()[:200]
-                if head and any(cue in head for cue in CORRECTION_CUES):
+                if head and any(
+                    head.startswith(cue) if cue == "no " else cue in head
+                    for cue in CORRECTION_CUES
+                ):
                     sig = signature(text)
                     if sig:
                         corrections.append((sig, f"{path.name}:{lineno}"))
@@ -141,6 +147,7 @@ def mine_file(path: Path) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]
 
 
 def group(pairs: list[tuple[str, str]], min_count: int) -> list[dict]:
+    """Return frequency-sorted candidates meeting min_count, with up to five evidence refs."""
     counts: Counter[str] = Counter(sig for sig, _ev in pairs)
     evidence: dict[str, list[str]] = defaultdict(list)
     for sig, ev in pairs:
@@ -154,6 +161,7 @@ def group(pairs: list[tuple[str, str]], min_count: int) -> list[dict]:
 
 
 def draft_g1(kind: str, candidate: dict) -> str:
+    """Render an unexecuted G1 command with a 70-char title and body-file placeholder."""
     title = f"{kind}: {candidate['signature'][:70]}"
     summary = f"Recurred {candidate['count']}x across recent sessions; drafted by mine_transcripts.py."
     return (
@@ -162,7 +170,16 @@ def draft_g1(kind: str, candidate: dict) -> str:
     )
 
 
+def _markdown_code(text: str) -> str:
+    """Wrap arbitrary single-line text in a CommonMark code span without delimiter collisions."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    delimiter = "`" * (longest + 1)
+    padding = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{delimiter}{padding}{text}{padding}{delimiter}"
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Mine transcript dirs and write review drafts under OUT_DIR; return 0 or usage error 2."""
     parser = argparse.ArgumentParser(
         prog="mine_transcripts.py",
         description="Mine agent session transcripts for GOTCHA candidates (drafts only; never writes the DB).",
@@ -190,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
         files.extend(sorted(base.glob("*.jsonl")))
         if args.include_subagents:
             files.extend(sorted(base.glob("subagents/**/*.jsonl")))
+    unique_files: dict[Path, Path] = {}
+    for path in files:
+        unique_files.setdefault(path.resolve(), path)
+    files = list(unique_files.values())
 
     all_errors: list[tuple[str, str]] = []
     all_corrections: list[tuple[str, str]] = []
@@ -202,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     correction_candidates = group(all_corrections, 1)[: args.limit]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "scanned_files": len(files),
@@ -228,23 +249,31 @@ def main(argv: list[str] | None = None) -> int:
         "",
     ]
     for c in error_candidates:
-        lines.append(f"- **{c['count']}x** `{c['signature']}`")
+        lines.append(f"- **{c['count']}x** {_markdown_code(c['signature'])}")
         lines.append(f"  - evidence: {', '.join(c['evidence'])}")
-        lines.append(f"  - draft: `{draft_g1('Tool failure', c)}`")
+        lines.append(f"  - draft: {_markdown_code(draft_g1('Tool failure', c))}")
     if not error_candidates:
         lines.append("- none above threshold")
     lines.extend(["", "## User corrections", ""])
     for c in correction_candidates:
-        lines.append(f"- **{c['count']}x** `{c['signature']}`")
+        lines.append(f"- **{c['count']}x** {_markdown_code(c['signature'])}")
         lines.append(f"  - evidence: {', '.join(c['evidence'])}")
-        lines.append(f"  - draft: `{draft_g1('User correction', c)}`")
+        lines.append(f"  - draft: {_markdown_code(draft_g1('User correction', c))}")
     if not correction_candidates:
         lines.append("- none found")
     md_path = OUT_DIR / f"gotcha-candidates-{stamp}.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     if args.json:
-        print(json.dumps({"status": "OK", "markdown": str(md_path), "json": str(json_path), **{k: report[k] for k in ("scanned_files", "tool_error_events", "correction_events")}, "tool_error_candidates": len(error_candidates), "correction_candidates": len(correction_candidates)}, indent=2))
+        payload = {
+            "status": "OK",
+            "markdown": str(md_path),
+            "json": str(json_path),
+            **{k: report[k] for k in ("scanned_files", "tool_error_events", "correction_events")},
+            "tool_error_candidates": len(error_candidates),
+            "correction_candidates": len(correction_candidates),
+        }
+        print(json.dumps(payload, indent=2))
     else:
         print(f"OK: {len(error_candidates)} tool-error + {len(correction_candidates)} correction candidates")
         print(f"markdown: {md_path}")

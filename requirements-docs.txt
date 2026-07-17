@@ -4,9 +4,8 @@
 #
 #     pip install -r requirements-docs.txt
 #
-# Version floors, not exact pins: pypdf ships frequent security fixes (malformed-PDF DoS /
-# excessive-memory classes), so keep it recent — bump these to the latest releases at release
-# time. E1 also enforces size/page/encrypted/empty-text guards regardless of pypdf version.
-pypdf>=5.1.0
-python-docx>=1.1.2
-openpyxl>=3.1.5
+# Exact opt-in pins are refreshed together after PyPI version and OSV advisory checks. E1 also
+# enforces size/page/encrypted/empty-text guards regardless of dependency version.
+pypdf==6.14.2
+python-docx==1.2.0
+openpyxl==3.1.5

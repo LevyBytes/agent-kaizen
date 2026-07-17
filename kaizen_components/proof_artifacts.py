@@ -1,7 +1,8 @@
+"""Implement A-family artifact and Q-family verification, evaluation, and anti-pattern record operations."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from .db import fetch_all, fetch_one, new_id, now, write_tx
@@ -20,33 +21,26 @@ _GATED_SUCCESS_CONCLUSIONS = {"VERIFIED_ACCEPTABLE", "ACCEPTABLE_WITH_CONCERNS"}
 
 
 def add_artifact(args: Any) -> dict[str, Any]:
+    """A1: register repo-relative artifact row w/ sha256/size; denies paths outside REPO_ROOT; file need not yet exist."""
     raw_path = getattr(args, "path", None)
     if not raw_path:
         raise KaizenDenied("DENIED_PATH_REQUIRED", {"required_action": "resubmit with --path"}, exit_code=2)
-    path = Path(raw_path)
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    # Artifact records must stay repo-portable: repo_relative() and A5 (verify) both
-    # anchor on REPO_ROOT, so a path outside it (including ../ traversal) is denied.
-    try:
-        path = assert_under(REPO_ROOT, path)
-    except ValueError:
-        raise KaizenDenied(
-            "DENIED_PATH_OUTSIDE_REPO",
-            {
-                "path": str(path),
-                "required_action": "reference a file inside the repository; copy external evidence under AI/work/ first",
-            },
-            exit_code=2,
-        ) from None
-    sha = file_sha256(path) if path.is_file() else None
-    size = path.stat().st_size if path.is_file() else None
-    summary = _text_arg(args, "summary", f"Artifact reference for {repo_relative(path)}.")
+    path = resolve_user_path(raw_path, require_file=False)
+    relative_path = repo_relative(path)
+    sha = None
+    size = None
+    if path.is_file():
+        try:
+            size = path.stat().st_size
+            sha = file_sha256(path)
+        except OSError as error:
+            raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"path": relative_path}, exit_code=1) from error
+    summary = _text_arg(args, "summary", f"Artifact reference for {relative_path}.")
     body = _text_arg(args, "body", "")
     validate_text_fields({"summary": summary, "body": body})
     record_id = new_id("a")
     created = now()
-    content_hash = utc_text_hash({"id": record_id, "path": str(path), "sha256": sha, "body": body})
+    content_hash = utc_text_hash({"id": record_id, "path": relative_path, "sha256": sha, "body": body})
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
@@ -58,7 +52,7 @@ def add_artifact(args: Any) -> dict[str, Any]:
                 created,
                 getattr(args, "task_id", None),
                 getattr(args, "kind", None) or "file",
-                repo_relative(path),
+                relative_path,
                 sha,
                 size,
                 summary,
@@ -73,6 +67,7 @@ def add_artifact(args: Any) -> dict[str, Any]:
 
 
 def hash_file(args: Any) -> dict[str, Any]:
+    """A2: sha256 a file (repo-only unless --allow-external); sanitized external origin."""
     allow_external = bool(getattr(args, "allow_external", False))
     path = resolve_user_path(
         getattr(args, "path", None),
@@ -86,6 +81,7 @@ def hash_file(args: Any) -> dict[str, Any]:
 
 
 def list_artifacts(args: Any) -> dict[str, Any]:
+    """A3: list/search artifacts by path/summary/body LIKE, newest first."""
     query = getattr(args, "query", None)
     if query:
         pattern = like_pattern(query)
@@ -110,6 +106,7 @@ def list_artifacts(args: Any) -> dict[str, Any]:
 
 
 def inspect_artifact(args: Any) -> dict[str, Any]:
+    """A4: full artifact record by id."""
     record_id = getattr(args, "id", None)
     if not record_id:
         raise KaizenDenied("DENIED_ID_REQUIRED", {"required_action": "resubmit with --id"}, exit_code=2)
@@ -138,13 +135,17 @@ def inspect_artifact(args: Any) -> dict[str, Any]:
 
 
 def verify_artifact_hash(args: Any) -> dict[str, Any]:
+    """A5: recompute on-disk sha256 vs stored, return match bool."""
     record_id = getattr(args, "id", None)
     if not record_id:
         raise KaizenDenied("DENIED_ID_REQUIRED", {"required_action": "resubmit with --id"}, exit_code=2)
     row = fetch_one("SELECT path, sha256 FROM artifacts WHERE id = ?", (record_id,))
     if row is None:
         raise KaizenDenied("DENIED_RECORD_NOT_FOUND", {"id": record_id, "table": "artifacts"}, exit_code=1)
-    path = REPO_ROOT / row[0]
+    try:
+        path = assert_under(REPO_ROOT, REPO_ROOT / row[0])
+    except ValueError:
+        raise KaizenDenied("DENIED_PATH_OUTSIDE_REPO", {"path": row[0]}, exit_code=1) from None
     if not path.is_file():
         raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"path": str(path)}, exit_code=1)
     actual = file_sha256(path)
@@ -152,6 +153,7 @@ def verify_artifact_hash(args: Any) -> dict[str, Any]:
 
 
 def add_verification(args: Any) -> dict[str, Any]:
+    """Q2: record verification event; success conclusions (L19) gated (L196-219) while linked run has live children/approvals; failure/decision conclusions always allowed."""
     summary = _text_arg(args, "summary", "")
     body = _text_arg(args, "body", "")
     validate_text_fields({"summary": summary, "body": body})
@@ -293,6 +295,7 @@ def query_verifications(args: Any) -> dict[str, Any]:
 
 
 def add_eval_case(args: Any) -> dict[str, Any]:
+    """Q3: record eval case (requires --title)."""
     title = _text_arg(args, "title", "")
     if not title:
         raise KaizenDenied("DENIED_TITLE_REQUIRED", {"required_action": "resubmit with --title"}, exit_code=2)
@@ -302,6 +305,16 @@ def add_eval_case(args: Any) -> dict[str, Any]:
     record_id = new_id("qe")
     created = now()
     content_hash = utc_text_hash({"id": record_id, "title": title, "summary": summary, "body": body})
+    expected_json = _text_arg(args, "expected_json", "")
+    if expected_json:
+        try:
+            json.loads(expected_json)
+        except json.JSONDecodeError as error:
+            raise KaizenDenied(
+                "DENIED_EXPECTED_JSON_INVALID",
+                {"required_action": "pass valid JSON in --expected-json or --expected-json-file"},
+                exit_code=2,
+            ) from error
 
     def op(conn: Any, _attempt: int) -> None:
         conn.execute(
@@ -318,7 +331,7 @@ def add_eval_case(args: Any) -> dict[str, Any]:
                 summary,
                 body,
                 getattr(args, "path", None),
-                _text_arg(args, "expected_json", "") or None,
+                expected_json or None,
                 content_hash,
                 1 if getattr(args, "test", False) else 0,
             ),
@@ -329,6 +342,7 @@ def add_eval_case(args: Any) -> dict[str, Any]:
 
 
 def add_eval_run(args: Any) -> dict[str, Any]:
+    """Q4: record eval run."""
     summary = _text_arg(args, "summary", "")
     body = _text_arg(args, "body", "")
     validate_text_fields({"summary": summary, "body": body})
@@ -359,6 +373,7 @@ def add_eval_run(args: Any) -> dict[str, Any]:
 
 
 def add_anti_pattern(args: Any) -> dict[str, Any]:
+    """Record anti-pattern; all 8 fields required."""
     required = ["title", "symptom", "maintainability_harm", "trigger_evidence", "preferred_correction", "valid_exceptions", "verification", "summary"]
     values = {name: _text_arg(args, name, "") for name in required}
     missing = [name for name, value in values.items() if not value]
@@ -402,6 +417,7 @@ def add_anti_pattern(args: Any) -> dict[str, Any]:
 
 
 def query_anti_patterns(args: Any) -> dict[str, Any]:
+    """Read-back anti-patterns by title/summary/symptom/trigger_evidence LIKE (requires --query)."""
     query = getattr(args, "query", None)
     if not query:
         raise KaizenDenied("DENIED_QUERY_REQUIRED", {"required_action": "resubmit with --query"}, exit_code=2)
@@ -424,15 +440,21 @@ def query_anti_patterns(args: Any) -> dict[str, Any]:
 
 def inspect_quality(args: Any) -> dict[str, Any]:
     # Q7 routes by --kind; eval-run/eval-case give Q4/Q3 records a read-back path.
-    kind_tables = {"verifier": "verification_events", "eval-run": "eval_runs", "eval-case": "eval_cases"}
-    table = kind_tables.get(getattr(args, "kind", None) or "", "artifacts")
+    """Q7: fetch verifier/eval-run/eval-case/artifact row by id+--kind via closed allowlist."""
+    kind_queries = {
+        "verifier": ("verification_events", "SELECT * FROM verification_events WHERE id = ?", "PRAGMA table_info(verification_events)"),
+        "eval-run": ("eval_runs", "SELECT * FROM eval_runs WHERE id = ?", "PRAGMA table_info(eval_runs)"),
+        "eval-case": ("eval_cases", "SELECT * FROM eval_cases WHERE id = ?", "PRAGMA table_info(eval_cases)"),
+        "artifact": ("artifacts", "SELECT * FROM artifacts WHERE id = ?", "PRAGMA table_info(artifacts)"),
+    }
+    table, select_sql, columns_sql = kind_queries.get(getattr(args, "kind", None) or "", kind_queries["artifact"])
     record_id = getattr(args, "id", None)
     if not record_id:
         raise KaizenDenied("DENIED_ID_REQUIRED", {"required_action": "resubmit with --id"}, exit_code=2)
-    row = fetch_one(f"SELECT * FROM {table} WHERE id = ?", (record_id,))
+    row = fetch_one(select_sql, (record_id,))
     if row is None:
         raise KaizenDenied("DENIED_RECORD_NOT_FOUND", {"id": record_id, "table": table}, exit_code=1)
-    columns = [r[1] for r in fetch_all(f"PRAGMA table_info({table})")]
+    columns = [r[1] for r in fetch_all(columns_sql)]
     return {"status": "OK", "record": dict(zip(columns, row))}
 
 
@@ -442,7 +464,7 @@ def _json_arg(args: Any, name: str, default: Any) -> Any:
     Mirrors ``_text_arg``: the file form exists because Windows PowerShell 5.1
     strips quotes inside inline JSON argv, so agents need a quoting-proof path."""
     raw = getattr(args, name, None)
-    if raw is None or raw == "":
+    if raw is None:
         file_value = getattr(args, f"{name}_file", None)
         if not file_value:
             return default

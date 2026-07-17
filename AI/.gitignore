@@ -3,11 +3,6 @@
 !generation/
 !work/
 !support_scripts_work/
-# AI-generated harness tests are tracked (AI/tests) -- only .py/.md, never .pyc caches.
-!tests/
-!tests/**/
-!tests/**/*.py
-!tests/**/*.md
 !generation/.gitignore
 !work/.gitignore
 !support_scripts_work/.gitignore

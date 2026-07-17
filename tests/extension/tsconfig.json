@@ -1,0 +1,10 @@
+{
+  "extends": "../../extension/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "typeRoots": ["../../extension/node_modules/@types"],
+    "sourceMap": false,
+    "noEmitOnError": true
+  },
+  "include": ["./**/*.ts"]
+}

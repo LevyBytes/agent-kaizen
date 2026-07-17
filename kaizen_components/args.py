@@ -154,6 +154,20 @@ ALIASES = {
     "B5": ["B5", "pii-scan"],
     "B6": ["B6", "model-monitor"],
     "B7": ["B7", "embed-index"],
+    "B8": ["B8", "backend-registry"],
+    "C1": ["C1", "session-start"],
+    "C2": ["C2", "instruction-add"],
+    "C3": ["C3", "goal-upsert"],
+    "C4": ["C4", "approval-upsert"],
+    "C5": ["C5", "session-timeline"],
+    "C6": ["C6", "mode-profile"],
+    "D1": ["D1", "node-register"],
+    "D2": ["D2", "node-heartbeat"],
+    "D4": ["D4", "coordinator-claim"],
+    "D5": ["D5", "lease-request"],
+    "D7": ["D7", "remote-dispatch"],
+    "D8": ["D8", "fleet-digest"],
+    "D9": ["D9", "reconcile"],
 }
 
 ALIAS_TO_CODE = {alias.lower(): code for code, aliases in ALIASES.items() for alias in aliases}
@@ -270,6 +284,20 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     "B5": ("Advisory PII scan (augments regex)", ("pii", "redact", "secret", "ner")),
     "B6": ("Monitor live model backends", ("monitor", "watch", "gpu", "vram", "running", "status")),
     "B7": ("Manage per-model embedding indexes", ("index", "activate", "prune", "rollback", "embedding", "migrate")),
+    "B8": ("Manage remote model endpoints", ("backend", "endpoint", "registry", "failover", "remote", "probe")),
+    "C1": ("Create or resume an agent session", ("orchestration", "session", "resume", "controller", "mode")),
+    "C2": ("Add a session user instruction", ("orchestration", "instruction", "prompt", "session")),
+    "C3": ("Create or update a session goal", ("orchestration", "goal", "objective", "session")),
+    "C4": ("Create or update an approval request", ("orchestration", "approval", "decision", "session")),
+    "C5": ("Read a session's joined timeline", ("orchestration", "timeline", "session", "instructions", "goals", "approvals")),
+    "C6": ("Manage owner mode profiles", ("mode", "profile", "permission", "designated", "roots", "plan")),
+    "D1": ("Register this node in the fleet", ("fleet", "node", "register")),
+    "D2": ("Record a fleet node heartbeat", ("fleet", "heartbeat", "liveness")),
+    "D4": ("Claim, transfer, or release the coordinator role", ("fleet", "coordinator", "epoch", "transfer")),
+    "D5": ("Request, grant, renew, release, or hand off a lease", ("fleet", "lease", "scope", "handoff", "shadow")),
+    "D7": ("Dispatch a run to a fleet node", ("fleet", "dispatch", "remote", "attach", "apply", "patch")),
+    "D8": ("Generate the fleet digest", ("fleet", "digest", "nodes", "coordinator")),
+    "D9": ("Reconcile after isolation or node loss", ("fleet", "reconcile", "offline", "iso", "orphan", "sweep")),
 }
 
 # Ready-to-adapt examples for the ops agents reach for most; everything else gets a generic form.
@@ -291,6 +319,14 @@ _K0_EXAMPLES = {
     "X1": 'python kaizen.py X1 --title "Rule" --summary "One sentence." --body "The rule." --priority high --json',
     "X5": 'python kaizen.py X5 --json',
     "E1": 'python kaizen.py E1 --path docs/spec.md --summary "Ingest the spec." --json',
+    "D1": 'python kaizen.py D1 --payload-json "{\\"role\\":\\"worker\\"}" --summary "This node." --json  (needs KAIZEN_DIST_MODE=observe|active)',
+    "D2": 'python kaizen.py D2 --json  (needs KAIZEN_DIST_MODE=observe|active)',
+    "D4": 'python kaizen.py D4 --action claim --summary "Claim coordinator." --json  (needs KAIZEN_DIST_MODE=observe|active)',
+    "D5": 'python kaizen.py D5 --action request --scope PROJECT_ID/kz/task/node --summary "Request lease." --json  (needs KAIZEN_DIST_MODE=observe|active)',
+    "D7": 'python kaizen.py D7 --action request --scope PROJECT_ID/kz/task/node --payload-json "{\\"target_node\\":\\"nNODE\\",\\"task\\":\\"refactor\\"}" --summary "Dispatch." --json  (needs a granted lease + KAIZEN_DIST_MODE=observe|active)',
+    "D8": 'python kaizen.py D8 --json  (needs KAIZEN_DIST_MODE=observe|active)',
+    "D9": 'python kaizen.py D9 --action reconcile --summary "Reconcile after reconnect." --json  (needs KAIZEN_DIST_MODE=observe|active)',
+    "B8": 'python kaizen.py B8 --action add --payload-json "{\\"base_url\\":\\"https://gb10.tail1234.ts.net/v1\\",\\"lanes\\":[\\"text\\"],\\"model\\":\\"qwen2.5\\"}" --json',
 }
 
 
@@ -349,8 +385,8 @@ Examples:
 Command families:
   K* DB/core | W* work/tasks/plans/packets | G* GOTCHA | L* LEARNING/LEARNED
   Q* quality/evals/verification/proof | M* migration | R* reports | S* sources
-  I* IRL Review | A* artifacts | X* private context/policy | T* traces/scores | E* evidence ingestion | O* improvement lab
-  Y* generative runs (ComfyUI) | B* model/embedding backends
+  I* IRL Review | A* artifacts | X* private context/policy | T* traces/scores/agent runs | E* evidence ingestion | O* improvement lab
+  Y* generative runs (ComfyUI) | B* model/embedding backends | C* sessions | D* fleet
 
 Use the code form or named alias. For example, K1 and db-check are identical.
 """
@@ -399,6 +435,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent-run-id", dest="agent_run_id", help="agent run id (T6/T7/T8)")
     parser.add_argument("--agent-type", dest="agent_type", help="T5: agent_type (codex|claude|other)")
     parser.add_argument("--surface", help="T5: surface (vscode-extension|cli|app-server|cloud|manual)")
+    parser.add_argument("--session-id", dest="session_id", help="agent session id (C2/C3/C4/C5)")
+    parser.add_argument("--controller", help="C1: session controller (observed|kaizen)")
+    parser.add_argument("--mode", help="C1: session mode (see orchestration.modes SESSION_MODES)")
+    parser.add_argument("--auth-mode", dest="auth_mode", help="C1: billing lane (none|subscription|api-key)")
+    parser.add_argument("--engine", help="C1: engine label for the session")
+    parser.add_argument("--permission-mode", dest="permission_mode", help="C1: UI permission ceiling (plan|ask|agent|full)")
+    parser.add_argument("--requested-model", dest="requested_model", help="C1: owner-selected model")
+    parser.add_argument("--requested-reasoning-effort", dest="requested_reasoning_effort", help="C1: owner-selected reasoning effort")
+    parser.add_argument("--profile-hash", dest="profile_hash", help="C1: immutable conversation profile hash")
+    parser.add_argument("--name", help="C6: mode-profile name (e.g. plan)")
     parser.add_argument("--chunker", help="chunking strategy: recursive (default) or semantic (needs an embedding backend)")
     parser.add_argument("--contract", help="improvement-lab task contract / signature name")
     parser.add_argument("--metric", help="improvement-lab metric name")
@@ -406,10 +452,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-score", type=float, dest="candidate_score", help="candidate metric score")
     parser.add_argument("--endpoint", help="backend HTTP endpoint URL (e.g. ComfyUI; default http://127.0.0.1:8188)")
     parser.add_argument("--timeout", type=float, help="max seconds to wait on a backend run")
+    parser.add_argument("--probe-timeout", type=float, help="max seconds for a backend reachability probe")
     parser.add_argument("--template", help="generative-run output template / subdir name")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run", help="validate + record without calling the backend")
     parser.add_argument("--prompt", help="prompt text (B2 model-run; Y8/Y9 replaces the {{PROMPT}} placeholder)")
-    parser.add_argument("--workflow-file", dest="path", help="ComfyUI prompt JSON path (Y1/Y8/Y9; alias of --path)")
+    path_options = parser.add_mutually_exclusive_group()
+    path_options.add_argument("--workflow-file", dest="path", help="ComfyUI prompt JSON path (Y1/Y8/Y9; alias of --path)")
+    path_options.add_argument("--path", help="file or fixture path")
     parser.add_argument("--action", help="Y6/Y7 subaction (Y6: status|provision|start|stop|doctor; Y7: doctor|bakeoff|run)")
     parser.add_argument("--route", choices=["api", "mcp"], help="Y8: generation route (default api)")
     parser.add_argument("--candidate", help="Y7: MCP candidate slug")
@@ -439,14 +488,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--body", help="record body")
     parser.add_argument("--body-file", help="read body from file when inline input is unsafe")
     parser.add_argument("--scope", help="record scope")
-    parser.add_argument("--status", help="record status")
+    parser.add_argument("--status", help="record status (W3/W4: draft|active|blocked|completed|canceled)")
     parser.add_argument("--writer-role", help="writer role label")
     parser.add_argument("--trigger", help="policy trigger label")
     parser.add_argument("--priority", help="policy priority label")
     parser.add_argument("--query", help="query text")
     parser.add_argument("--limit", type=int, help="maximum records")
     parser.add_argument("--threshold", type=float, help="O5: cosine similarity threshold for near-duplicate clustering")
-    parser.add_argument("--path", help="file or fixture path")
     parser.add_argument(
         "--allow-external",
         action="store_true",
@@ -504,6 +552,7 @@ def canonical_operation(raw: str | None) -> str:
 
 
 def dispatch(args: argparse.Namespace) -> dict[str, Any]:
+    """Routes a parsed args namespace by canonical op code to its handler; raises usage_denial for recognized-but-unimplemented."""
     if args.version:
         return {"status": "OK", "tool_version": TOOL_VERSION}
     operation = canonical_operation(args.operation)
@@ -627,6 +676,53 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             return agent_run_inspect(args)
         return agent_run_finalize(args)
 
+    if operation in {"C1", "C2", "C3", "C4", "C5", "C6"}:
+        from .session_records import (
+            approval_upsert,
+            goal_upsert,
+            instruction_add,
+            mode_profile,
+            session_start,
+            session_timeline,
+        )
+
+        if operation == "C1":
+            return session_start(args)
+        if operation == "C2":
+            return instruction_add(args)
+        if operation == "C3":
+            return goal_upsert(args)
+        if operation == "C4":
+            return approval_upsert(args)
+        if operation == "C6":
+            return mode_profile(args)
+        return session_timeline(args)
+
+    if operation in {"D1", "D2", "D4", "D5", "D7", "D8", "D9"}:
+        from .fleet.records import (
+            coordinator_action,
+            fleet_digest,
+            lease_action,
+            node_heartbeat,
+            node_register,
+            reconcile,
+            remote_dispatch,
+        )
+
+        if operation == "D1":
+            return node_register(args)
+        if operation == "D2":
+            return node_heartbeat(args)
+        if operation == "D4":
+            return coordinator_action(args)
+        if operation == "D5":
+            return lease_action(args)
+        if operation == "D7":
+            return remote_dispatch(args)
+        if operation == "D9":
+            return reconcile(args)
+        return fleet_digest(args)
+
     if operation in {"E1", "E3", "E4", "E5"}:
         from .evidence import chunk_document, ingest_file, inspect_evidence, query_evidence
 
@@ -714,6 +810,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         from .model_index import embed_index
 
         return embed_index(args)
+
+    if operation == "B8":
+        from .backend_registry import backend_registry
+
+        return backend_registry(args)
 
     migration_dispatch = {
         "M1": migration_learning.scan_roots,
@@ -981,6 +1082,15 @@ def irl_report(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry: intercepts `daemon` subcommand, builds parser, dispatches, and maps KaizenDenied/JSONDecodeError/Exception to error envelopes with exit codes."""
+    argv = list(sys.argv[1:]) if argv is None else list(argv)
+    # `daemon` is a process-manager subcommand, not a record op: it lives outside
+    # ALIASES/REGISTRY -- and therefore outside the public op-coverage matrix -- by
+    # design. M0 ships a parse-only skeleton; the supervisor runtime arrives at M1.
+    if argv[:1] == ["daemon"]:
+        from .orchestration.daemon_cli import daemon_main
+
+        return daemon_main(argv[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.operation and not args.version:

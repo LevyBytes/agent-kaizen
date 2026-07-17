@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "worker_protocol": 1,
+  "sdk_package": "@anthropic-ai/claude-agent-sdk",
+  "sdk_version": "0.3.207",
+  "zod_version": "4.4.3",
+  "worker_entry": "dist/worker.js",
+  "native_binary_required": true,
+  "lifecycle_scripts_allowed": false,
+  "max_frame_bytes": 1048576,
+  "max_delta_bytes": 32768,
+  "capability_probes": [
+    "streaming",
+    "image_attachments",
+    "governed_context",
+    "diff_snapshots",
+    "controlled_tools",
+    "process_execution"
+  ],
+  "tools": [
+    "kaizen_read_file",
+    "kaizen_list_files",
+    "kaizen_search_text",
+    "kaizen_run_process",
+    "kaizen_propose_changes"
+  ]
+}

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+  <!-- The host replaces this head with the CSP-bearing runtime head; it remains for standalone validity. -->
+  <head>
+    <meta charset="UTF-8" />
+    <title>Kaizen Chat</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar" class="topbar">
+        <div class="brand" aria-label="Kaizen chat">
+          <img class="brand-icon" src="{{KAIZEN_LOGO_URI}}" alt="" />
+          <span>Kaizen</span>
+        </div>
+        <span id="status" class="status" data-state="idle" role="status">Ready</span>
+        <span class="spacer"></span>
+        <button id="historyButton" class="icon-button" type="button" title="Conversation history" aria-label="Conversation history">&#128339;</button>
+        <button id="newSession" class="icon-button" type="button" title="New conversation" aria-label="New conversation">+</button>
+        <details id="overflow" class="overflow">
+          <summary class="icon-button" title="More actions" aria-label="More actions">&#8230;</summary>
+          <div class="overflow-menu" role="group" aria-label="Conversation options">
+            <label class="menu-field" for="effort">
+              <span>Effort</span>
+              <select id="effort" class="dropdown" aria-label="Reasoning effort"></select>
+            </label>
+            <label id="authField" class="menu-field" for="auth">
+              <span>Authentication</span>
+              <select id="auth" class="dropdown" aria-label="Authentication mode"></select>
+            </label>
+            <button id="refreshCapabilities" class="menu-button" type="button">Refresh capabilities</button>
+            <button id="stopDaemon" class="menu-button danger" type="button" hidden>Stop Daemon</button>
+            <button id="kill" class="menu-button danger" type="button" disabled>Kill conversation</button>
+          </div>
+        </details>
+      </header>
+
+      <div id="lossWarning" class="loss-warning" role="alert" hidden></div>
+      <div id="warnings" class="warnings" aria-live="polite"></div>
+      <div id="runtimeStatus" class="runtime-status" role="status" aria-live="polite" hidden></div>
+      <div id="banner" class="banner" role="alert" hidden></div>
+      <div id="continuationBanner" class="continuation-banner" role="status" hidden></div>
+
+      <main id="content" class="content">
+        <section id="welcome" class="welcome" aria-labelledby="welcomeTitle">
+          <img class="welcome-icon" src="{{KAIZEN_LOGO_URI}}" alt="" />
+          <h1 id="welcomeTitle">Kaizen</h1>
+          <p>Governed coding-agent conversations in this workspace.</p>
+          <button id="startDaemon" class="primary-button" type="button">Start Daemon in Visible Terminal</button>
+          <p class="welcome-note">The daemon starts only when you ask and remains visible in a terminal.</p>
+        </section>
+
+        <section id="chatScreen" class="chat-screen" hidden>
+          <div id="transcript" class="transcript" role="log" aria-label="Conversation transcript" aria-relevant="additions text" tabindex="0"></div>
+        </section>
+
+        <section id="historyScreen" class="history-screen" aria-labelledby="historyTitle" hidden>
+          <div class="history-head">
+            <div>
+              <h2 id="historyTitle">Conversation history</h2>
+              <div id="historyMeta" class="history-meta"></div>
+            </div>
+            <div class="history-toggle" role="group" aria-label="History controller">
+              <button id="historyDriven" type="button" aria-pressed="true">Driven</button>
+              <button id="historyObserved" type="button" aria-pressed="false">Observed</button>
+            </div>
+          </div>
+          <div id="historyList" class="history-list" role="list"></div>
+        </section>
+      </main>
+
+      <footer id="composer" class="composer">
+        <div id="imageChips" class="image-chips" aria-label="Image attachments"></div>
+        <div id="contextChips" class="context-chips" aria-label="Governed context"></div>
+        <div id="queueChips" class="queue-chips" aria-label="Queued follow-ups"></div>
+        <div id="mentionResults" class="mention-results" role="listbox" aria-label="File mentions" hidden></div>
+        <label class="sr-only" for="prompt">Message the agent</label>
+        <textarea id="prompt" class="prompt" rows="3" role="combobox" aria-autocomplete="list" aria-controls="mentionResults" aria-expanded="false" placeholder="Message the agent&#8230;"></textarea>
+        <div class="composer-bar">
+          <div id="profile" class="profile-pills" aria-label="Conversation profile">
+            <label class="pill" title="Engine">
+              <span class="sr-only">Engine</span>
+              <select id="engine" aria-label="Engine"></select>
+            </label>
+            <label class="pill model-pill" title="Model">
+              <span class="sr-only">Model</span>
+              <input id="model" list="models" aria-label="Model" autocomplete="off" />
+              <datalist id="models"></datalist>
+            </label>
+            <label class="pill" title="Permission">
+              <span class="sr-only">Permission</span>
+              <select id="permission" aria-label="Permission mode"></select>
+            </label>
+            <label id="maxTurnsField" class="pill max-turns-pill" title="Hard model round-trip ceiling" hidden>
+              <span>Turns</span>
+              <input id="maxTurns" type="number" inputmode="numeric" aria-label="Maximum model round trips" />
+            </label>
+          </div>
+          <div id="contextActions" class="context-actions" aria-label="Add governed context" hidden>
+            <button id="addImage" class="icon-button" type="button" title="Add image">Image</button>
+            <button id="addFile" class="icon-button" type="button" title="Add file context">@ File</button>
+            <button id="addSelection" class="icon-button" type="button" title="Add current selection">Selection</button>
+          </div>
+          <span class="spacer"></span>
+          <button id="turnStop" class="secondary-button danger" type="button" hidden>Stop</button>
+          <button id="send" class="primary-button send" type="button">Send</button>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

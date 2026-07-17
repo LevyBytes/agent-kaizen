@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Agent Kaizen setup for Linux / macOS after the repo is cloned.
-set -euo pipefail
+set -Eeuo pipefail
 
 DEVROOT_ARG=""
 LIST_STEPS=0
 EMIT_PLAN_JSON=""
 AK_PYTURSO_WHEEL_URL="${AK_PYTURSO_WHEEL_URL:-}"
+AK_WITH_CLAUDE_RUNTIME="${AK_WITH_CLAUDE_RUNTIME:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -21,11 +22,22 @@ while [ $# -gt 0 ]; do
     --assume-yes) AK_ASSUME_YES=1 ;;
     --no-input) AK_NO_INPUT=1 ;;
     --pyturso-wheel-url) AK_PYTURSO_WHEEL_URL="${2:-}"; shift ;;
+    --with-claude-runtime) AK_WITH_CLAUDE_RUNTIME=1 ;;
     -* ) printf 'unknown arg: %s\n' "$1" >&2; exit 64 ;;
     * ) if [ -z "$DEVROOT_ARG" ]; then DEVROOT_ARG="$1"; else printf 'unexpected arg: %s\n' "$1" >&2; exit 2; fi ;;
   esac
   shift
 done
+
+normalize_bool() {
+  # Args: variable name for diagnostics and raw value; emit 1/0 or exit 64 for an invalid boolean.
+  case "$2" in
+    1|true|enabled) printf '1' ;;
+    0|false|disabled|"") printf '0' ;;
+    *) printf "ERROR: invalid %s boolean '%s' (expected 1/true/enabled or 0/false/disabled)\n" "$1" "$2" >&2; exit 64 ;;
+  esac
+}
+AK_WITH_CLAUDE_RUNTIME="$(normalize_bool AK_WITH_CLAUDE_RUNTIME "$AK_WITH_CLAUDE_RUNTIME")"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -40,14 +52,15 @@ ak_init "Agent Kaizen setup (Linux/macOS)" "$REPO_ROOT" "$DEVROOT_RESOLVED" \
   "$(ak_step_obj venv 'Create or validate shared Python venv')" \
   "$(ak_step_obj rust 'Ensure Rust toolchain for building pyturso')" \
   "$(ak_step_obj deps 'Install pinned Agent Kaizen dependencies')" \
+  "$(ak_step_obj claude-runtime 'Install or validate the pinned Claude provider runtime')" \
   "$(ak_step_obj skills 'Select and install Agent Kaizen skills')" \
   "$(ak_step_obj workspace 'Generate VS Code workspace')" \
   "$(ak_step_obj db 'Initialize local Kaizen DB')" \
   "$(ak_step_obj summary 'Print completion summary')"
 
+[ -z "$EMIT_PLAN_JSON" ] || ak_write_plan_json "$EMIT_PLAN_JSON"
 if [ "$LIST_STEPS" -eq 1 ] || [ "$AK_PLAN_ONLY" -eq 1 ]; then
   ak_show_plan
-  [ -z "$EMIT_PLAN_JSON" ] || ak_write_plan_json "$EMIT_PLAN_JSON"
   exit 0
 fi
 [ "$AK_SELF_TEST" -eq 0 ] || ak_show_plan
@@ -55,10 +68,13 @@ fi
 PY=""
 VENV="$DEVROOT_RESOLVED/Python/venvs/kaizen"
 VENV_PY="$VENV/bin/python"
+CLAUDE_NODE="$DEVROOT_RESOLVED/node/bin/node"
+CLAUDE_NPM="$DEVROOT_RESOLVED/node/bin/npm"
 WS_DIR="$REPO_ROOT/_workspace"
 # Project + workspace naming. The bootstrap may rename the clone (folder + workspace file); the
 # canonical name keeps the pretty "Agent Kaizen" label, a renamed project uses its own name.
 PROJECT_NAME="${AK_PROJECT_NAME:-$(basename "$REPO_ROOT")}"
+case "$PROJECT_NAME" in ''|*[!A-Za-z0-9._-]*) ak_die "AK_PROJECT_NAME/repository name must use only letters, digits, dot, underscore, or hyphen." "$AK_EX_USAGE" ;; esac
 if [ "$PROJECT_NAME" = "agent-kaizen" ]; then WS_LABEL="Agent Kaizen"; else WS_LABEL="$PROJECT_NAME"; fi
 WS_FILE="$WS_DIR/${PROJECT_NAME}-tools.code-workspace"
 WHEEL_CACHE="$DEVROOT_RESOLVED/wheels"
@@ -67,6 +83,7 @@ WHEEL_CACHE="$DEVROOT_RESOLVED/wheels"
 TOOL_RUST="${AK_TOOL_RUST:-0}"
 
 ak_have_pyturso_wheel() {
+  # Return success when either the shared cache or repo wheel directory contains any pyturso wheel.
   local d
   for d in "$WHEEL_CACHE" "$REPO_ROOT/wheels"; do
     [ -d "$d" ] || continue
@@ -91,10 +108,11 @@ step_venv() {
   if [ ! -x "$VENV_PY" ]; then
     mkdir -p "$DEVROOT_RESOLVED/Python/venvs"
     ak_run --note "Creating the shared Agent Kaizen Python virtual environment." -- "$PY" -m venv "$VENV"
+    ak_assert_network_allowed 'pip upgrade in the shared Agent Kaizen venv'
+    ak_run --note "Upgrading pip in the new shared Agent Kaizen venv." -- "$VENV_PY" -m pip install --upgrade pip
   else
     printf 'venv already present: %s\n' "$VENV"
   fi
-  ak_run --note "Upgrading pip in the shared Agent Kaizen venv." -- "$VENV_PY" -m pip install --upgrade pip
 }
 
 step_rust() {
@@ -126,13 +144,17 @@ step_deps() {
     printf 'Python dependencies already satisfied (pyturso imports); skipping.\n'
     return 0
   fi
-  ak_run --note "Upgrading pip in the shared Agent Kaizen venv." -- "$VENV_PY" -m pip install --upgrade pip \
-    || ak_die "Could not upgrade pip in the shared venv." "$AK_EX_SOFTWARE"
+  ak_assert_network_allowed 'Agent Kaizen Python dependency installation'
 
   mkdir -p "$WHEEL_CACHE"
   # Optional prebuilt pyturso wheel (skips the Rust/C source build), mirroring Windows -PyTursoWheelUrl.
   if [ -n "$AK_PYTURSO_WHEEL_URL" ] && [ "$AK_NO_NETWORK" -eq 0 ]; then
-    ak_download "$AK_PYTURSO_WHEEL_URL" "$WHEEL_CACHE/$(basename "${AK_PYTURSO_WHEEL_URL%%\?*}")" 100000 \
+    local wheel_url_path="${AK_PYTURSO_WHEEL_URL%%\?*}"
+    wheel_url_path="${wheel_url_path%%\#*}"
+    local wheel_name
+    wheel_name="$(basename "$wheel_url_path")"
+    case "$wheel_name" in *.whl) ;; *) ak_die "AK_PYTURSO_WHEEL_URL must name a .whl file." "$AK_EX_USAGE" ;; esac
+    ak_download "$AK_PYTURSO_WHEEL_URL" "$WHEEL_CACHE/$wheel_name" 100000 \
       || printf '  [warn] could not download the pyturso wheel from AK_PYTURSO_WHEEL_URL\n' >&2
   fi
 
@@ -162,13 +184,45 @@ step_deps() {
   fi
 
   if [ "$built_from_source" -eq 1 ]; then
-    ak_run --note "Caching the built Turso wheel so later runs skip the toolchain." -- "$VENV_PY" -m pip wheel pyturso==0.6.1 -w "$WHEEL_CACHE" \
+    local pyturso_version
+    pyturso_version="$("$VENV_PY" -c 'from importlib.metadata import version; print(version("pyturso"))')" \
+      || ak_die "Could not resolve the installed pyturso version for wheel caching." "$AK_EX_SOFTWARE"
+    ak_run --note "Caching the built Turso wheel so later runs skip the toolchain." -- "$VENV_PY" -m pip wheel "pyturso==$pyturso_version" -w "$WHEEL_CACHE" \
       || printf '  [warn] could not cache the built Turso wheel\n' >&2
   fi
 
   # Import smoke check -- the real acceptance test for the native module.
   "$VENV_PY" -c 'import turso; print("turso import OK")' \
     || ak_die "Turso installed but failed to import (see the setup command logs)." "$AK_EX_SOFTWARE"
+}
+
+step_claude_runtime() {
+  if [ "$AK_WITH_CLAUDE_RUNTIME" -ne 1 ]; then
+    ak_step_skipped 'not selected'
+    return 0
+  fi
+
+  local helper="$REPO_ROOT/setup/claude_runtime_setup.py"
+  [ -f "$helper" ] || ak_die "Claude runtime setup helper not found: $helper" "$AK_EX_UNAVAILABLE"
+  [ -x "$CLAUDE_NODE" ] || ak_die "Claude runtime requires the managed Node executable at $CLAUDE_NODE; install DEVROOT-local Node and rerun." "$AK_EX_UNAVAILABLE"
+  [ -x "$CLAUDE_NPM" ] || ak_die "Claude runtime requires the managed npm executable at $CLAUDE_NPM; install DEVROOT-local Node and rerun." "$AK_EX_UNAVAILABLE"
+
+  ak_assert_external_allowed "$VENV_PY" "$helper" check
+  export DEVROOT="$DEVROOT_RESOLVED"
+  if "$VENV_PY" "$helper" check; then
+    ak_step_skipped 'pinned Claude provider runtime already valid'
+    return 0
+  fi
+
+  if [ "$AK_NO_NETWORK" -eq 1 ]; then
+    ak_die "Claude provider runtime is unavailable and --no-network blocks its installation. Rerun without --no-network after approving the dependency fetch." "$AK_EX_UNAVAILABLE"
+  fi
+  ak_assert_network_allowed 'Claude Agent SDK runtime installation'
+  ak_run --note "Installing the pinned Claude provider runtime with the exact DEVROOT-local Node/npm." -- \
+    "$VENV_PY" "$helper" install \
+    || ak_die "Claude provider runtime installation failed (see the setup command log)." "$AK_EX_SOFTWARE"
+  "$VENV_PY" "$helper" check \
+    || ak_die "Claude provider runtime installed but failed its post-install validation." "$AK_EX_SOFTWARE"
 }
 
 step_skills() {
@@ -181,15 +235,16 @@ step_skills() {
 }
 
 step_workspace() {
+  # Deterministically overwrite the workspace and launcher after validating names and escaping each output format.
   mkdir -p "$WS_DIR"
   {
     printf '{\n'
     printf '  "folders": [\n'
-    printf '    { "name": "%s", "path": ".." },\n' "$WS_LABEL"
+    printf '    { "name": "%s", "path": ".." },\n' "$(ak_json_escape "$WS_LABEL")"
     printf '    { "name": "SKILLS", "path": "../../SKILLS" }\n'
     printf '  ],\n'
     printf '  "settings": {\n'
-    printf '    "python.defaultInterpreterPath": "${workspaceFolder:%s}/../Python/venvs/kaizen/bin/python",\n' "$WS_LABEL"
+    printf '    "python.defaultInterpreterPath": "${workspaceFolder:%s}/../Python/venvs/kaizen/bin/python",\n' "$(ak_json_escape "$WS_LABEL")"
     printf '    "python.terminal.activateEnvironment": false,\n'
     printf '    "files.exclude": { "**/__pycache__": true },\n'
     printf '    "search.exclude": { "**/__pycache__": true }\n'
@@ -201,7 +256,7 @@ step_workspace() {
   # workspace in a new VS Code window. On native Linux `code` opens locally; over Remote-WSL open
   # from the Windows side with `code --remote wsl+<distro> <workspace>`.
   local launcher="$REPO_ROOT/open-${PROJECT_NAME}-vscode.sh"
-  { printf '#!/usr/bin/env bash\n'; printf 'exec code -n "%s" "$@"\n' "$WS_FILE"; } > "$launcher"
+  { printf '#!/usr/bin/env bash\nexec code -n '; ak_shell_quote "$WS_FILE"; printf ' "$@"\n'; } > "$launcher"
   chmod +x "$launcher"
   printf 'launcher : %s\n' "$launcher"
 }
@@ -223,6 +278,7 @@ ak_run_step preflight 'Validate git, Python 3.12+, and setup roots' step_preflig
 ak_run_step venv 'Create or validate shared Python venv' step_venv
 ak_run_step rust 'Ensure Rust toolchain for building pyturso' step_rust
 ak_run_step deps 'Install pinned Agent Kaizen dependencies' step_deps
+ak_run_step claude-runtime 'Install or validate the pinned Claude provider runtime' step_claude_runtime
 ak_run_step skills 'Select and install Agent Kaizen skills' step_skills
 ak_run_step workspace 'Generate VS Code workspace' step_workspace
 ak_run_step db 'Initialize local Kaizen DB' step_db

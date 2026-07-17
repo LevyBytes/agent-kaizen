@@ -50,7 +50,7 @@ if hasattr(sys.stdin, "reconfigure"):
     sys.stdin.reconfigure(encoding="utf-8-sig")
 
 
-LOG_PATH = Path(__file__).with_suffix(".log")
+LOG_PATH = Path(__file__).resolve().with_suffix(".log")
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_STEM = Path(__file__).stem
 
@@ -535,7 +535,8 @@ def clean_for_log(value: str) -> str:
     """Make user-entered text safe for the simple pipe-delimited log format.
 
     " | " is the history field separator and square brackets would look like
-    unresolved placeholders in the finished prompt, so both are neutralized.
+    unresolved placeholders in the finished prompt, so both are neutralized. Filesystem paths must
+    bypass this destructive normalization because brackets are legal path characters.
     """
     return normalize_spaces(value).replace(" | ", " / ").replace("[", "(").replace("]", ")")
 
@@ -752,8 +753,15 @@ def write_log(
     lines.extend(devlog)
 
     tmp_path = LOG_PATH.with_name(LOG_PATH.name + ".tmp")
-    tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.replace(tmp_path, LOG_PATH)
+    try:
+        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(tmp_path, LOG_PATH)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def format_history_entry(entry: RunEntry) -> str:
@@ -814,15 +822,19 @@ def read_multiline_answer(sentinel: str = MULTILINE_SENTINEL) -> str:
             break
         if line.strip().upper() == sentinel:
             break
-        size += len(line) + 1
-        if size > PASTE_CAP:
+        line_size = len(line) + 1
+        if size + line_size > PASTE_CAP:
+            remaining = max(0, PASTE_CAP - size - 1)
+            if remaining:
+                collected.append(line[:remaining])
             print("  Too long; using what was captured so far.")
             break
+        size += line_size
         collected.append(line)
     return "\n".join(collected)
 
 
-def confirm_or_enter(label: str, explanation: str, default: str, allow_back: bool = False):
+def confirm_or_enter(label: str, explanation: str, default: str, allow_back: bool = False) -> str | object:
     """Ask a free-text question in one step: keep the default or replace it.
 
     Enter keeps the shown default; typing anything makes that text the new
@@ -850,9 +862,8 @@ def confirm_or_enter(label: str, explanation: str, default: str, allow_back: boo
 def validate_path(value: str) -> tuple[bool, str]:
     """Validate a folder-path setting; return (ok, feedback message).
 
-    Rejects empty input and paths with characters that are invalid in a folder
-    name; otherwise resolves the path (relative paths against the repo root)
-    and reports the resolved folder and whether it already exists.
+    Rejects empty input, control characters, and ``<>"|?*`` while permitting ``:`` for Windows
+    drive letters; resolves relative paths against the repo root and reports whether the folder exists.
     """
     raw = value.strip()
     if not raw:
@@ -889,7 +900,7 @@ def prompt_path(label: str, explanation: str, default: str) -> str:
                 "or press Enter to keep the default."
             )
             continue
-        value = default if answer == "" else clean_for_log(answer)
+        value = default if answer == "" else answer.strip()
         ok, feedback = validate_path(value)
         print(feedback)
         if ok:
@@ -902,7 +913,7 @@ def prompt_menu(
     options: tuple[tuple[str, tuple[str, ...], str], ...],
     default: str,
     allow_back: bool = False,
-):
+) -> str | object:
     """Ask a choice question selectable by number, letter, or full value.
 
     Returns the chosen value, or BACK when allow_back and the user types b.
@@ -935,7 +946,7 @@ def prompt_toggle(label: str, explanation: str, default: str) -> str:
     while True:
         answer = read_line(f"  {label} [{shown}] (on/off or y/n, q=quit): ").strip().lower()
         if answer == "":
-            return default
+            return shown
         if answer in {"on", "y", "yes", "1", "true"}:
             return "on"
         if answer in {"off", "n", "no", "0", "false"}:
@@ -992,7 +1003,7 @@ def walk_settings(settings: OrderedDict[str, str]) -> tuple[OrderedDict[str, str
         elif key in PATH_SETTINGS:
             updated[key] = prompt_path(key, FOLDER_EXPLANATIONS.get(key, ""), updated[key])
         else:
-            updated[key] = confirm_or_enter(key, FOLDER_EXPLANATIONS.get(key, ""), updated[key])
+            raise RuntimeError(f"unsupported setting key: {key}")
     return updated, updated != settings
 
 
@@ -1046,7 +1057,7 @@ def ask_mode(
             if reprint_source is None:
                 print("No previous run in this session to reprint.")
                 continue
-            output = build_output_safely(settings, reprint_source, len(history))
+            output = build_output_safely(settings, reprint_source)
             if output is None:
                 raise SystemExit(1)
             emit_output(settings, output)
@@ -1113,7 +1124,7 @@ def choose_session(
     return session
 
 
-def ask_llm_target(default: str, allow_back: bool = False):
+def ask_llm_target(default: str, allow_back: bool = False) -> str | object:
     """Ask where the generated prompt will run: extension or online LLM."""
     return prompt_menu(
         "Where will you run the generated prompt?",
@@ -1137,7 +1148,7 @@ def ask_llm_target(default: str, allow_back: bool = False):
 
 def ask_llm_name(
     llm_target: str, current_name: str, session_last: RunEntry | None, allow_back: bool = False
-):
+) -> str | object:
     """Ask which extension (Claude/Codex) or the online LLM's name."""
     if llm_target == "extension":
         default = current_name if current_name in EXTENSION_NAMES else (
@@ -1166,7 +1177,7 @@ def default_for_field(attr: str, llm_target: str, default: str) -> str:
     return default
 
 
-def risk_menu(default: str, allow_back: bool = False):
+def risk_menu(default: str, allow_back: bool = False) -> str | object:
     """Ask the cost-of-error level via a friendly menu."""
     return prompt_menu(
         "How costly is a mistake here?",
@@ -1194,7 +1205,7 @@ def print_interview_warning() -> None:
 
 def ask_interview_step(
     key: str, answers: dict[str, str], session_last: RunEntry | None
-):
+) -> str | object:
     """Ask one interview step by key; returns the value or the BACK sentinel."""
     if key == "llm_target":
         default = answers.get("llm_target") or (
@@ -1247,7 +1258,7 @@ def run_interview(mode: str, session_last: RunEntry | None, persist) -> dict[str
 
 
 def entry_from_answers(answers: dict[str, str], mode: str, timestamp: str, session: str) -> RunEntry:
-    """Build a RunEntry from an answers dict (descriptors + target/name)."""
+    """Build an entry from a complete interview containing target, name, and every known field."""
     return RunEntry(
         timestamp=timestamp,
         mode=mode,
@@ -1330,9 +1341,9 @@ def read_pasted_block(expect_json: bool = False) -> str:
     """Read a pasted reply and return its text, finishing the way users paste.
 
     When expect_json is True (the sharpen reply is a JSON object), the block
-    finishes the instant the captured text parses as JSON, so pasting it (on one
-    line or many) and pressing Enter completes with no terminator; a blank line
-    also finishes. Otherwise (a free-text critique that may contain blank lines)
+    finishes the instant the captured text parses as JSON, so pasting it on one line or many
+    completes with no terminator; an initial blank line also finishes and internal blank lines are
+    preserved. Otherwise (a free-text critique that may contain blank lines)
     it finishes only on a terminator line. In every mode a line equal to END
     (case-insensitive) or the legacy <<END>>, or EOF, also finishes. Caps total
     size; reads literal text, so q is not treated as quit.
@@ -1340,7 +1351,7 @@ def read_pasted_block(expect_json: bool = False) -> str:
     if expect_json:
         print(
             "Paste the LLM reply; it finishes automatically once the JSON is complete "
-            "(or press Enter on a blank line, or type END)."
+            "(or type END)."
         )
     else:
         print(f"Paste the LLM reply, then a line containing only {MULTILINE_SENTINEL} to finish:")
@@ -1354,14 +1365,18 @@ def read_pasted_block(expect_json: bool = False) -> str:
         stripped = line.strip()
         if stripped.upper() == MULTILINE_SENTINEL or stripped == PASTE_SENTINEL:
             break
-        if expect_json and stripped == "":
+        if expect_json and stripped == "" and not collected:
             break
-        size += len(line) + 1
-        if size > PASTE_CAP:
+        line_size = len(line) + 1
+        if size + line_size > PASTE_CAP:
+            remaining = max(0, PASTE_CAP - size - 1)
+            if remaining:
+                collected.append(line[:remaining])
             print("Reply too large; using what was captured so far.")
             break
+        size += line_size
         collected.append(line)
-        if expect_json and parse_assist_response("\n".join(collected)) is not None:
+        if expect_json and stripped.endswith("}") and captured_json_is_complete("\n".join(collected)):
             break
     return "\n".join(collected)
 
@@ -1384,6 +1399,17 @@ def extract_json_text(block: str) -> str | None:
             if depth == 0:
                 return block[start : index + 1]
     return block[start:]  # unbalanced; let the repair layer try
+
+
+def captured_json_is_complete(block: str) -> bool:
+    """Return True only when the captured object is complete strict JSON, before repair is attempted."""
+    raw = extract_json_text(block)
+    if raw is None:
+        return False
+    try:
+        return isinstance(json.loads(raw), dict)
+    except json.JSONDecodeError:
+        return False
 
 
 def preclean_json(text: str) -> str:
@@ -1551,17 +1577,8 @@ def apply_sharpen_response(
     edited: list[str] = []
     for attr, suggested in suggestions.items():
         if attr == "risk_level":
-            default = suggested if suggested in RISK_LEVELS else answers["risk_level"]
-            new_value = prompt_menu(
-                f"{LABEL_BY_ATTR[attr]} (LLM-suggested)",
-                "",
-                (
-                    ("low", ("l",), "proceed with checkpoints"),
-                    ("medium", ("m",), "confirm key decisions first"),
-                    ("high", ("h",), "confirm every decision and propose guardrails"),
-                ),
-                default,
-            )
+            default = suggested if suggested in RISK_LEVELS else answers.get("risk_level", DEFAULT_RISK)
+            new_value = risk_menu(default)
         else:
             new_value = confirm_or_enter(
                 f"{LABEL_BY_ATTR[attr]} (LLM-suggested)", "", suggested
@@ -1613,7 +1630,7 @@ def run_assist_pass(
             answers, "new script prompt", datetime.now().strftime("%Y-%m-%d %H:%M"), ""
         )
         request = compose_critique_assist_request(
-            build_prompt(settings, draft_entry, len(history) + 1)
+            build_prompt(settings, draft_entry)
         )
     emit_assist_request(settings, request)
     block = read_pasted_block(expect_json=True)
@@ -1760,7 +1777,7 @@ def build_workflow_paths(settings: OrderedDict[str, str], run: RunEntry) -> tupl
     return prompt_path, result_path
 
 
-def build_prompt(settings: OrderedDict[str, str], run: RunEntry, run_number: int) -> str:
+def build_prompt(settings: OrderedDict[str, str], run: RunEntry) -> str:
     """Render the paste-ready prompt for the run's mode and LLM target."""
     if run.mode == "meta prompt":
         if run.llm_target == "online":
@@ -1804,19 +1821,17 @@ def build_prompt(settings: OrderedDict[str, str], run: RunEntry, run_number: int
     )
 
 
-def build_output(settings: OrderedDict[str, str], run: RunEntry, run_number: int) -> str:
+def build_output(settings: OrderedDict[str, str], run: RunEntry) -> str:
     """Wrap the generated prompt in terminal markers and verify it."""
-    prompt = build_prompt(settings, run, run_number)
+    prompt = build_prompt(settings, run)
     verify_prompt(prompt, run.mode, run.llm_target, run.llm_name)
     return "\n".join((OPENING_MARKER, prompt, CLOSING_MARKER))
 
 
-def build_output_safely(
-    settings: OrderedDict[str, str], run: RunEntry, run_number: int
-) -> str | None:
+def build_output_safely(settings: OrderedDict[str, str], run: RunEntry) -> str | None:
     """Build the output, or report a verification failure without crashing."""
     try:
-        return build_output(settings, run, run_number)
+        return build_output(settings, run)
     except RuntimeError as exc:
         print(f"Prompt failed verification and was not emitted: {exc}")
         return None
@@ -1865,7 +1880,7 @@ def verify_prompt(prompt: str, mode: str, llm_target: str, llm_name: str) -> Non
 
 
 def copy_to_clipboard(text: str) -> tuple[bool, str]:
-    """Copy text to the Windows clipboard with only standard-library ctypes."""
+    """Copy text on Windows; SetClipboardData success transfers HGLOBAL ownership to the clipboard."""
     if os.name != "nt":
         return False, "clipboard copy is only implemented for Windows"
 
@@ -1948,11 +1963,14 @@ def save_prompt_backup(
                 print("Backup not saved; folder was not created.")
                 return None
             folder.mkdir(parents=True, exist_ok=True)
+        path = folder / backup_filename(mode)
+        path.write_text(prompt_text_value + "\n", encoding="utf-8")
     except (EOFError, QuitRequested):
         print("\nBackup skipped.")
         return None
-    path = folder / backup_filename(mode)
-    path.write_text(prompt_text_value + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"Backup not saved: {exc}")
+        return None
     print(f"Saved prompt backup: {path}")
     return path
 
@@ -2008,7 +2026,7 @@ def offer_optional_dependencies(settings: OrderedDict[str, str]) -> None:
 
 
 def console_will_close_on_exit() -> bool:
-    """Detect a one-click launch whose console window dies with this process."""
+    """Treat probe errors or at most two console processes (Python plus launcher) as one-click exit."""
     if os.name != "nt":
         return False
     try:
@@ -2042,8 +2060,8 @@ def pause_before_exit_if_needed() -> None:
             pass
 
 
-def emit_output(settings: OrderedDict[str, str], output: str) -> None:
-    """Copy the prompt to the clipboard when enabled, then print the output."""
+def emit_output(settings: OrderedDict[str, str], output: str) -> str:
+    """Copy and print the prompt, returning the exact reusable payload."""
     payload = clipboard_payload(output)
     if is_enabled(settings["copy_to_clipboard"]):
         copied, message = copy_to_clipboard(payload)
@@ -2052,6 +2070,7 @@ def emit_output(settings: OrderedDict[str, str], output: str) -> None:
         else:
             print(f"Clipboard copy skipped: {message}.")
     print(output)
+    return payload
 
 
 def main() -> int:
@@ -2079,7 +2098,7 @@ def main() -> int:
 
         # Build (and verify) before logging so a failed build never records a
         # history line that would poison later `last` runs.
-        output = build_output_safely(settings, run, len(history) + 1)
+        output = build_output_safely(settings, run)
         if output is None:
             return 1
 
@@ -2095,8 +2114,8 @@ def main() -> int:
             events.append(f"emitted build-prompt archived at {prompt_archive_path}")
         devlog.extend(format_devlog_lines(len(history), run, assist_on, target_tag, events))
         write_log(settings, history, sessions, drafts, devlog)
-        emit_output(settings, output)
-        save_prompt_backup(settings, clipboard_payload(output), run.mode)
+        payload = emit_output(settings, output)
+        save_prompt_backup(settings, payload, run.mode)
         return 0
     except QuitRequested:
         print("\nQuit; the log remains valid.")

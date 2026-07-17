@@ -35,6 +35,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 if [ "$LIST_STEPS" -eq 1 ]; then AK_PLAN_ONLY=1; fi
+# installer-common.sh defaults preserve the safety selectors parsed above.
 # shellcheck source=setup/installer-common.sh
 source "$SCRIPT_DIR/installer-common.sh"
 
@@ -67,6 +68,8 @@ step_preflight() {
   [ -n "$GIT" ] || ak_die "git not found on PATH"
   if [ "$GPU" -eq 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
     printf '  ! NVIDIA GPU detected; re-run with --gpu for a CUDA torch wheel. Continuing with CPU torch.\n' >&2
+  elif [ "$GPU" -eq 1 ] && ! command -v nvidia-smi >/dev/null 2>&1; then
+    printf '  ! CUDA torch requested, but nvidia-smi was not found; verify the NVIDIA driver before using ComfyUI.\n' >&2
   fi
   printf 'DEVROOT: %s\n' "$DEVROOT_RESOLVED"
   printf 'ComfyUI target: %s\n' "$TARGET"
@@ -88,10 +91,12 @@ step_venv() {
   else
     printf 'ComfyUI venv already exists: %s\n' "$VENV"
   fi
+  ak_assert_network_allowed "pip upgrade in ComfyUI venv"
   ak_run --note "Upgrading pip inside the ComfyUI venv." -- "$VENV_PY" -m pip install --upgrade pip
 }
 
 step_torch() {
+  ak_assert_network_allowed "torch package installation"
   if [ "$GPU" -eq 1 ]; then
     ak_run --note "Installing CUDA torch packages from $CUDA_INDEX." -- "$VENV_PY" -m pip install torch torchvision torchaudio --index-url "$CUDA_INDEX"
   else
@@ -101,6 +106,7 @@ step_torch() {
 
 step_deps() {
   [ -f "$TARGET/requirements.txt" ] || ak_die "ComfyUI requirements file not found: $TARGET/requirements.txt"
+  ak_assert_network_allowed "ComfyUI requirements installation"
   ak_run --note "Installing ComfyUI requirements; pip output is logged and tailed while this runs." -- "$VENV_PY" -m pip install -r "$TARGET/requirements.txt"
 }
 
@@ -108,7 +114,7 @@ step_summary() {
   printf '\nComfyUI installed.\n'
   printf '  Models:    place checkpoints under %s/models/checkpoints/\n' "$TARGET"
   printf '  Start:     "%s" "%s/main.py"\n' "$VENV_PY" "$TARGET"
-  printf '  URL:       http://127.0.0.1:8188  (override with KAIZEN_COMFYUI_URL or --endpoint)\n'
+  printf '  URL:       http://127.0.0.1:8188  (override with KAIZEN_COMFYUI_URL or Y5 --endpoint)\n'
   printf '  Verify:    python kaizen.py Y5 --json\n'
 }
 

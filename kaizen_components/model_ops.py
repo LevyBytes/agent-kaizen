@@ -13,6 +13,7 @@ All three degrade gracefully when no backend is configured/reachable.
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -33,7 +34,7 @@ def _pii_tags_json(hits: list[dict[str, Any]]) -> str | None:
 
 
 def model_doctor(args: Any) -> dict[str, Any]:
-    """B1: report configured embedding + text backends and whether they are reachable."""
+    """B1: report configured embedding/text backends; a probe KaizenDenied becomes reachable=False with its sanitized reason instead of failing the command."""
     embed = get_embedding_backend()
     text = get_text_backend()
     report: dict[str, Any] = {
@@ -59,7 +60,7 @@ def model_doctor(args: Any) -> dict[str, Any]:
 
 
 def model_run(args: Any) -> dict[str, Any]:
-    """B2: advisory text generation, recorded as a model_call trace (never final authority)."""
+    """B2: require a configured text backend and prompt, enforce redaction, run advisory generation, and persist only a model_call trace plus hashed output reference, never raw output or final authority."""
     backend = get_text_backend()
     if backend is None:
         raise KaizenDenied(
@@ -81,12 +82,13 @@ def model_run(args: Any) -> dict[str, Any]:
     )
 
     started = time.monotonic()
-    result = backend.chat(prompt)
+    backend_result = backend.chat(prompt)
     latency_ms = int((time.monotonic() - started) * 1000)
-    usage = result.get("usage", {}) if isinstance(result.get("usage"), dict) else {}
+    raw_usage = backend_result.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
 
     # The raw model output is stored only as a hash ref; a human-authored summary is the durable text.
-    output_ref = utc_text_hash({"text": result.get("text", "")})
+    output_ref = utc_text_hash({"text": backend_result.get("text", "")})
     summary = _text_arg(args, "summary", "Advisory model-run (kind=model_call); output stored as a hash ref.")
     validate_text_fields({"summary": summary, "body": ""})
     assert_redacted({"summary": summary})
@@ -95,7 +97,7 @@ def model_run(args: Any) -> dict[str, Any]:
         "kind": "model_call",
         "task_id": getattr(args, "task_id", None),
         "trace_id": getattr(args, "trace_id", None),
-        "model": result.get("model", backend.model),
+        "model": backend_result.get("model", backend.model),
         "provider": backend.name,
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
@@ -110,6 +112,7 @@ def model_run(args: Any) -> dict[str, Any]:
 
     record_id = new_id("te")
     created = now()
+    # Content hashes cover present logical fields; absent optional columns are omitted by convention.
     content_hash = utc_text_hash({"id": record_id, **{k: v for k, v in payload.items() if v is not None}})
 
     is_test = 1 if getattr(args, "test", False) else 0
@@ -130,7 +133,7 @@ def model_run(args: Any) -> dict[str, Any]:
         )
 
     write_tx(op)
-    result = {
+    response = {
         "status": "OK",
         "id": record_id,
         "advisory": True,
@@ -143,8 +146,8 @@ def model_run(args: Any) -> dict[str, Any]:
         "note": "advisory only; not an acceptance authority unless a deterministic verifier confirms.",
     }
     if pii_advisory:
-        result["pii_advisory"] = pii_advisory
-    return result
+        response["pii_advisory"] = pii_advisory
+    return response
 
 
 def reembed(args: Any) -> dict[str, Any]:
@@ -192,18 +195,28 @@ def reembed(args: Any) -> dict[str, Any]:
             task_id=getattr(args, "task_id", None), is_test=1 if getattr(args, "test", False) else 0,
         )
         created = now()
-        dimension = len(vectors[0]) if vectors and vectors[0] else 0
+        dimension = next((len(vector) for vector in vectors if vector), 0)
 
-        def op(conn: Any, _attempt: int) -> None:
+        def op(conn: Any, _attempt: int) -> int:
+            before = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chunk_embeddings WHERE embedding_model = ?", (model,)
+                ).fetchone()[0]
+            )
             for (chunk_id, _text, chunk_is_test), vector in zip(rows, vectors):
                 conn.execute(
                     "INSERT OR IGNORE INTO chunk_embeddings "
                     "(chunk_id, embedding_model, dim, embedding, created_at, is_test) VALUES (?, ?, ?, vector32(?), ?, ?)",
                     (chunk_id, model, len(vector), json.dumps(vector), created, int(chunk_is_test or 0)),
                 )
+            after = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chunk_embeddings WHERE embedding_model = ?", (model,)
+                ).fetchone()[0]
+            )
+            return max(0, after - before)
 
-        write_tx(op)
-        built = len(rows)
+        built = write_tx(op)
 
     result: dict[str, Any] = {"status": "OK", "model": model, "reembedded": built}
     if built:
@@ -230,14 +243,23 @@ def _build_judge_prompt(rubric: str, candidate: str) -> str:
 
 def _parse_verdict(text: str) -> dict[str, Any]:
     """Tolerant parse of the model's JSON verdict; never raises (falls back to 'unparseable')."""
-    import re
+    raw = text or ""
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant: {value}")
 
-    match = re.search(r"\{.*\}", text or "", re.DOTALL)
-    try:
-        data = json.loads(match.group(0) if match else (text or ""))
-        if not isinstance(data, dict):
-            raise ValueError("verdict is not an object")
-    except Exception:  # noqa: BLE001 -- any malformed model output degrades to a categorical verdict
+    decoder = json.JSONDecoder(parse_constant=reject_constant)
+    data: dict[str, Any] | None = None
+    for index, char in enumerate(raw):
+        if char != "{":
+            continue
+        try:
+            candidate, _end = decoder.raw_decode(raw[index:])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(candidate, dict):
+            data = candidate
+            break
+    if data is None:
         return {"verdict": "unparseable", "score": None, "rationale": ""}
     verdict = str(data.get("verdict", "")).lower().strip() or "unparseable"
     score = data.get("score")
@@ -245,11 +267,13 @@ def _parse_verdict(text: str) -> dict[str, Any]:
         score = float(score) if score is not None else None
     except (TypeError, ValueError):
         score = None
+    if score is not None and (not math.isfinite(score) or not 0.0 <= score <= 1.0):
+        score = None
     return {"verdict": verdict, "score": score, "rationale": str(data.get("rationale", ""))[:200]}
 
 
 def _resolve_rubric(args: Any) -> str:
-    """Rubric from --query, --expected-json[-file], or an --eval-case-id lookup."""
+    """Resolve a nonempty rubric in query, expected-json, expected-json-file, then eval-case-id precedence; deny a missing case or exhausted sources."""
     rubric = getattr(args, "query", None) or getattr(args, "expected_json", None)
     if not rubric and getattr(args, "expected_json_file", None):
         from .paths import read_text_file
@@ -282,7 +306,8 @@ def _judge_candidate(backend: Any, rubric: str, candidate: str) -> dict[str, Any
     started = time.monotonic()
     result = backend.chat(prompt, temperature=0, max_tokens=512)
     latency_ms = int((time.monotonic() - started) * 1000)
-    usage = result.get("usage", {}) if isinstance(result.get("usage"), dict) else {}
+    raw_usage = result.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else {}
     return {
         "verdict": _parse_verdict(result.get("text", "")),
         "raw_text": result.get("text", ""),
@@ -385,7 +410,7 @@ def model_judge(args: Any) -> dict[str, Any]:
         value, data_type = verdict["score"], "numeric"
     else:
         value, data_type = verdict["verdict"], "categorical"
-    # Drop the rationale from the durable comment if it would trip redaction (never fail the op on it).
+    # Drop secret- or personal-email-like rationale from the durable comment; never fail the op on it.
     comment = verdict["rationale"] if verdict["rationale"] and not scan_for_secrets(verdict["rationale"]) else None
     score_payload = {
         "trace_event_id": trace_event_id,

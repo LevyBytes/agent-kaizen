@@ -52,6 +52,7 @@ MODELS="$DEVROOT_RESOLVED/Ollama/models"
 OLLAMA=""
 
 step_preflight() {
+  if [ ! -d "$MODELS" ]; then ak_assert_external_allowed "create model store $MODELS"; fi
   mkdir -p "$MODELS"
   export OLLAMA_MODELS="$MODELS"
   OLLAMA="$(command -v ollama || true)"
@@ -61,18 +62,21 @@ step_preflight() {
 }
 
 step_embed() {
+  ak_assert_network_allowed "$EMBED_MODEL"
   ak_run --note "Ollama is downloading/verifying model data for $EMBED_MODEL." -- "$OLLAMA" pull "$EMBED_MODEL"
 }
 
 step_chat() {
+  ak_assert_network_allowed "$CHAT_MODEL"
   ak_run --note "Ollama is downloading/verifying model data for $CHAT_MODEL." -- "$OLLAMA" pull "$CHAT_MODEL"
 }
 
 step_summary() {
   printf '\nOllama backend ready. Current-shell settings:\n'
   printf '  export OLLAMA_MODELS="%s"\n' "$MODELS"
-  printf '  export KAIZEN_EMBED_MODEL=%s\n' "$EMBED_MODEL"
-  printf '  export KAIZEN_LLM_MODEL=%s\n' "$CHAT_MODEL"
+  printf '  export KAIZEN_EMBED_MODEL="%s"\n' "$EMBED_MODEL"
+  printf '  export KAIZEN_LLM_MODEL="%s"\n' "$CHAT_MODEL"
+  printf '  Model-store relocation applies to pulls only when this process starts the server; restart an existing server with OLLAMA_MODELS set.\n'
   printf '  Verify: python kaizen.py B1 --json\n'
 }
 

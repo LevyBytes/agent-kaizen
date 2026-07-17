@@ -53,13 +53,15 @@ _HEDGE_WORDS = frozenset(
 )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Advisory sentence heuristic: avoid common abbreviations and split only before a capitalized start.
+_SENT_SPLIT_RE = re.compile(r"(?<!e\.g\.)(?<!i\.e\.)(?<=[.!?])\s+(?=[A-Z])", re.I)
 
 DEFAULT_HEDGE_DENSITY_MAX = 0.05
 DEFAULT_DUP_JACCARD = 0.6
 
 
 def _shingles(words: list[str], n: int = 3) -> set[tuple[str, ...]]:
+    """Return n-gram shingles, treating a shorter non-empty sentence as one shingle."""
     if len(words) < n:
         return {tuple(words)} if words else set()
     return {tuple(words[i : i + n]) for i in range(len(words) - n + 1)}
@@ -71,7 +73,7 @@ def lint_text(
     hedge_density_max: float = DEFAULT_HEDGE_DENSITY_MAX,
     dup_jaccard: float = DEFAULT_DUP_JACCARD,
 ) -> dict[str, Any]:
-    """Score ``text`` for contract density. Pure, deterministic, no side effects."""
+    """Return verdict, word/sentence counts, signal and hedge densities, filler/hedge hits, duplicate sentence pairs, and reasons; hedge_density_max and dup_jaccard are the failure thresholds."""
     words = _WORD_RE.findall(text)
     word_count = len(words)
 
@@ -100,9 +102,12 @@ def lint_text(
             if jaccard >= dup_jaccard:
                 duplicates.append({"a_index": i, "b_index": j, "jaccard": round(jaccard, 3)})
 
-    signal_per_token = (
-        round(1 - (len(filler_hits) + len(hedge_hits)) / word_count, 4) if word_count else 1.0
+    penalty_spans = [tuple(hit["span"]) for hit in filler_hits] + [tuple(hit["span"]) for hit in hedge_hits]
+    penalized_words = sum(
+        any(start < word.end() and word.start() < end for start, end in penalty_spans)
+        for word in _WORD_RE.finditer(text)
     )
+    signal_per_token = round(1 - penalized_words / word_count, 4) if word_count else 1.0
 
     reasons: list[str] = []
     if filler_hits:
@@ -126,7 +131,7 @@ def lint_text(
 
 
 def contract_lint(args: Any) -> dict[str, Any]:
-    """Q10: deterministic contract-density lint over --body / --body-file / --path text."""
+    """Q10: read text in body, body-file, then path precedence, deny when absent, and call lint_text with the fixed CLI thresholds; library callers may tune lint_text directly."""
     text = getattr(args, "body", None)
     if not text and getattr(args, "body_file", None):
         text = read_text_file(args.body_file)
@@ -138,7 +143,7 @@ def contract_lint(args: Any) -> dict[str, Any]:
             repo_only=not allow_external,
             allow_external_hint=not allow_external,
         )
-        text = read_text_file(path)
+        text = read_text_file(str(path))
     if not text:
         raise KaizenDenied(
             "DENIED_CONTRACT_TEXT_REQUIRED",

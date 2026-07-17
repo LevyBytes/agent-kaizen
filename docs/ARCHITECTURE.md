@@ -34,7 +34,7 @@ Every agent host writes through one deterministic CLI into one database; the nex
 | Surface | Role |
 | --- | --- |
 | `kaizen.py` | Deterministic write path + reports (the data-plane CLI) |
-| `kaizen_components/` | Engine behind the CLI (schema, redaction, backends) |
+| `kaizen_components/` | Engine behind the CLI (schema, redaction, orchestration, fleet, backends) |
 | `AI/db/` | Local data plane: DB, exports, manifests, backups |
 | `Kaizen_System.md` | Portable method for humans and agents |
 | `CLAUDE.md`, `AGENTS.md` | Identical host instructions that point at the manuals |
@@ -43,6 +43,6 @@ Every agent host writes through one deterministic CLI into one database; the nex
 
 ## Storage
 
-Turso/libSQL-compatible database via `pyturso`, direct local file at `AI/db/kaizen.db`: MVCC mode, bounded retries, app-generated IDs, SHA-256 hashes for entries and artifacts. Backend-agnostic by design — records must stay structured, queryable, and written through deterministic paths, but the store can be swapped. Record search uses escaped-substring `LIKE` (bounded by each query's `--limit`); optional embedding backends (Ollama/PyTorch) add semantic evidence search when configured. Nothing touches the network unless you configure an optional backend.
+Turso/libSQL-compatible database via `pyturso`, direct local file at `AI/db/kaizen.db`: MVCC mode, bounded retries, app-generated IDs, SHA-256 hashes for entries and artifacts. Backend-agnostic by design — records must stay structured, queryable, and written through deterministic paths, but the store can be swapped. Record search uses escaped-substring `LIKE` (bounded by each query's `--limit`); optional local/HTTP embedding and reranking backends (for example Ollama, PyTorch/transformers, and OpenAI-compatible APIs) add semantic evidence search when configured. Nothing touches the network unless you configure an optional backend.
 
 Full command index and per-op behavior: [README.md](../README.md). Portable method: [Kaizen_System.md](../Kaizen_System.md).

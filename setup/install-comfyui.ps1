@@ -3,13 +3,13 @@
   Guided install of ComfyUI as a DEVROOT sibling for Agent Kaizen's Y* backend.
 
   Usage:
-    setup\install-comfyui.ps1 [-Gpu] [-DevRoot D:\dev] [-PythonExe path] [-VenvPath path]
-    setup\install-comfyui.ps1 -ListSteps
-    setup\install-comfyui.ps1 -PlanOnly -NoNetwork -NoExternalActions
+    setup\install-comfyui.ps1 [-Gpu] [-CudaIndex url] [-Repo url] [-DevRoot D:\dev] [-PythonExe path] [-VenvPath path]
+    setup\install-comfyui.ps1 -ListSteps|-PlanOnly|-SelfTest [-EmitPlanJson path]
+    Safety/automation: -NoNetwork -NoExternalActions -NoUserEnvWrites -AssumeYes -NoInput -NoProgressHeader
 
-  -VenvPath places the ComfyUI virtual environment at a custom location (default:
-  <DevRoot>\ComfyUI\.venv). If you move it, set KAIZEN_COMFYUI_VENV to the same path so the
-  Y6 comfy-runtime ops find it.
+  -Gpu selects CUDA torch; -CudaIndex is used only with -Gpu, defaults to the CUDA 12.1 wheel index, and must match the local driver/runtime.
+  -Repo overrides the clone source. The first install clones the current unpinned default-branch HEAD; warm re-runs do not update it.
+  -VenvPath places the venv outside the default <DevRoot>\ComfyUI\.venv. The installer does not set KAIZEN_COMFYUI_VENV; set it manually to the same path so Y6 finds the moved venv.
 #>
 [CmdletBinding()]
 param(
@@ -50,7 +50,10 @@ if ($ListSteps -or $PlanOnly) {
     if (-not [string]::IsNullOrWhiteSpace($EmitPlanJson)) { Write-AkPlanJson -Path $EmitPlanJson }
     exit 0
 }
-if ($SelfTest) { Show-AkPlan }
+if ($SelfTest) {
+    Show-AkPlan
+    if (-not [string]::IsNullOrWhiteSpace($EmitPlanJson)) { Write-AkPlanJson -Path $EmitPlanJson }
+}
 
 $script:AkPython = ''
 $script:AkGit = ''
@@ -65,6 +68,8 @@ Invoke-AkStep -Id 'preflight' -Name 'Resolve DEVROOT, Python, Git, and target pa
     $script:AkGit = $git.Source
     if (-not $Gpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
         Write-Host 'NVIDIA GPU detected. Re-run with -Gpu for a CUDA torch wheel; continuing with CPU torch.' -ForegroundColor Yellow
+    } elseif ($Gpu -and -not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+        Write-Host 'CUDA torch requested, but nvidia-smi was not found; verify the NVIDIA driver before using ComfyUI.' -ForegroundColor Yellow
     }
     Write-Host ("DEVROOT: {0}" -f $resolvedDevRoot) -ForegroundColor Cyan
     Write-Host ("ComfyUI target: {0}" -f $script:AkTarget) -ForegroundColor Cyan
@@ -75,6 +80,7 @@ Invoke-AkStep -Id 'clone' -Name 'Clone or validate ComfyUI repository' -ScriptBl
     if (Test-Path -LiteralPath (Join-Path $script:AkTarget 'main.py')) {
         Write-Host ("ComfyUI already present: {0}" -f $script:AkTarget) -ForegroundColor Green
     } else {
+        Assert-AkNetworkAllowed $Repo
         Invoke-AkNative -Exe $script:AkGit -Arguments @('clone','--depth','1',$Repo,$script:AkTarget) -ActivityNote 'Git is cloning ComfyUI repository data; network speed controls the duration.'
     }
 }
@@ -84,11 +90,13 @@ Invoke-AkStep -Id 'venv' -Name 'Create ComfyUI virtual environment' -ScriptBlock
         Write-Host ("ComfyUI venv already exists: {0}" -f $script:AkVenv) -ForegroundColor Green
     } else {
         Invoke-AkNative -Exe $script:AkPython -Arguments @('-m','venv',$script:AkVenv) -ActivityNote 'Creating the ComfyUI Python virtual environment.'
+        Assert-AkNetworkAllowed 'pip upgrade in ComfyUI venv'
+        Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','--upgrade','pip') -ActivityNote 'Upgrading pip inside the ComfyUI venv.'
     }
-    Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','--upgrade','pip') -ActivityNote 'Upgrading pip inside the ComfyUI venv.'
 }
 
 Invoke-AkStep -Id 'torch' -Name 'Install CPU or CUDA torch packages' -ScriptBlock {
+    Assert-AkNetworkAllowed 'torch package installation'
     if ($Gpu) {
         Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','torch','torchvision','torchaudio','--index-url',$CudaIndex) -ActivityNote ('Installing CUDA torch packages from {0}.' -f $CudaIndex)
     } else {
@@ -99,6 +107,7 @@ Invoke-AkStep -Id 'torch' -Name 'Install CPU or CUDA torch packages' -ScriptBloc
 Invoke-AkStep -Id 'deps' -Name 'Install ComfyUI requirements' -ScriptBlock {
     $req = Join-Path $script:AkTarget 'requirements.txt'
     if (-not (Test-Path -LiteralPath $req)) { throw "ComfyUI requirements file not found: $req" }
+    Assert-AkNetworkAllowed 'ComfyUI requirements installation'
     Invoke-AkNative -Exe $script:AkVenvPython -Arguments @('-m','pip','install','-r',$req) -ActivityNote 'Installing ComfyUI requirements; pip output is logged and tailed while this runs.'
 }
 

@@ -1,4 +1,4 @@
-# A Three-Layer Scaffolding Method for LLM/LRE/FIM Integration
+# A Three-Layer Scaffolding Method: Spec / Verifier / Environment
 
 ### Spec → Verifier → Environment
 
@@ -82,7 +82,7 @@ Every assumption the model makes is a chance to drift from what the human actual
 
 <the decision this output drives, and who makes it — not the task>
 
-## Consumers \& next action
+## Consumers & next action
 
 <who reads/uses this, and what they do with it>
 
@@ -94,17 +94,17 @@ Every assumption the model makes is a chance to drift from what the human actual
 
 <explicitly deferred — prevents silent scope creep>
 
-## Inputs \& references
+## Inputs & references
 
 <files, data sources, historical examples — feeds Layer 2 external signal>
 
 ## Key decisions — confirm each before building
 
-- [ ] Decision: **_ | Options: _** | Recommended: **_ | Human confirmed: _**
+- [ ] Decision: `___` | Options: `___` | Recommended: `___` | Human confirmed: `___`
 
 ## Assumptions — confirm or eliminate each
 
-- [ ] ***
+- [ ] `___`
 
 ## Acceptance criteria
 
@@ -190,9 +190,9 @@ Embed this block in every spec and every multi-step prompt:
 
 - /docs/ ← authoritative product docs; check here first for product questions
 - /data/reference/ ← reference data; treat as read-only input
-- /reports/history/← past outputs; use as format reference (Layer 2 external signal)
+- /reports/history/ ← past outputs; use as format reference (Layer 2 external signal)
 
-## 3. Skills index \& routing
+## 3. Skills index & routing
 
 <one line each: trigger condition → skill>
 
@@ -284,7 +284,7 @@ Bucket every recurring action into one of three tiers (this is P5 made operation
 | **Ask first** | Human confirms before action  | Working rule + the agent asks                                                                 |
 | **Never do**  | A line that cannot be crossed | Tool-level enforcement — hooks, permission deny rules, sandbox config. **Never prose alone.** |
 
-**Why prose isn't enough:** a line in CLAUDE.md saying "don't touch /critical/" is a request the model can still violate — it gets you perhaps 80% of the way. For the remaining 20%, enforce at the tool level so the violation is _impossible_, not merely discouraged.
+**Why prose isn't enough:** a line in CLAUDE.md saying "don't touch /critical/" is a request the model can still violate — it gets you perhaps 80% of the way. For the remaining 20%, enforce at the tool level. Prefer a static deny rule when possible; the hook below is an illustrative sketch, not complete path validation.
 
 **Claude Code enforcement — PreToolUse hook.** Hooks run shell commands at lifecycle events. A PreToolUse hook fires before a tool call; the matcher targets tool names; **exit code 2 blocks the call** and feeds stderr back to the agent as the reason. (Gotcha: exit code 1 is treated as a _non-blocking_ error and the action proceeds — policy hooks must use exit 2.)
 
@@ -307,16 +307,16 @@ Bucket every recurring action into one of three tiers (this is P5 made operation
 
 ```bash
 #!/bin/bash
-# Reads the tool call as JSON on stdin; blocks edits inside protected paths.
+# Illustrative only: normalize paths before production use; this forward-slash substring check does not cover traversal or Windows backslashes.
 file_path=$(jq -r '.tool_input.file_path // empty')
 if [[ "$file_path" == *"/critical/"* ]]; then
-  echo "Blocked by policy: files under /critical/ are never edited by the agent." >\&2
+  echo "Blocked by policy: files under /critical/ are never edited by the agent." >&2
   exit 2
 fi
 exit 0
 ```
 
-Simpler alternative for path-based rules: a `permissions.deny` entry in `.claude/settings.json` (e.g., `"deny": ["Edit(./critical/**)"]`). Hooks are for logic; deny rules are for static paths.
+Simpler alternative for path-based rules: a `permissions.deny` entry in `.claude/settings.json` (e.g., `"deny": ["Edit(./critical/**)"]`). Hooks are for logic; deny rules are for static paths. On Windows, prefer the deny rule for static paths; the illustrative Bash hook also requires Bash and `jq`.
 
 **Codex / other agents:** the equivalents are sandbox and approval-mode configuration, read-only mounts, restricted credentials, and CI checks that reject violating changes. The principle is identical: **Never-do tiers live in the tool layer, not the prompt layer.**
 

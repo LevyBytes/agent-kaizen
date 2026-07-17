@@ -3,7 +3,7 @@
 
 Fetches the caption tracks YouTube itself serves to its player for a video - the auto-generated
 (speech-recognition / "ASR") track and/or a creator-uploaded ("manual") track - and writes each as
-timestamped JSON. English only, for now.
+timestamped JSON. Transcript extraction selects English tracks; ``--list`` reports all languages.
 
 When BOTH an English manual transcript and an English auto-generated transcript exist for the same
 video (uncommon), it downloads both and also writes a short comparison report, so you can see how the
@@ -20,9 +20,51 @@ endpoints. It contains no third-party code and depends only on the Python standa
 Usage:
   python yt_transcript.py <video-id-or-URL> [--list] [--out-dir DIR] [--print]
 
-Output defaults to <repo>/AI/support_scripts_work/transcripts/ (gitignored): one
-`<video_id>.<manual|generated>.json` per track found, plus `<video_id>.comparison.md` when both exist.
+Output defaults to <repo>/AI/support_scripts_work/transcripts/ (gitignored). File names embed a
+deterministic slug of the video title (see sanitize_title) and the video ID:
+  <title-slug>_<video_id>_manual_transcript.json      creator-uploaded track
+  <title-slug>_<video_id>_generated_transcript.json   auto-generated (ASR) track
+  <title-slug>_<video_id>_comparison.md               only when both tracks exist
 Pulled transcripts are third-party copyrighted content - keep them in the gitignored output area.
+
+Notes for AI agents driving this script
+  Invocation
+    - Stdlib only, Python >= 3.8, no pip installs. ANY interpreter that has outbound network
+      permission on this host works; the repo venv is not required for this script.
+    - Accepts a bare 11-char video ID or any watch/youtu.be/shorts/embed/live URL.
+    - `--print` echoes each transcript JSON to stdout so you can consume it without a second
+      file read; the human-facing summary goes to stderr either way.
+    - `--list` enumerates every caption track (all languages) and exits; use it when the
+      default English pick fails or you need to see what exists.
+  Outputs (names = <title-slug>_<video_id>_...; slug is a pure function of the title, so the
+  same video always yields the same file names - safe to re-run, files just overwrite)
+    - ..._manual_transcript.json     creator-uploaded track (higher trust: human-punctuated).
+    - ..._generated_transcript.json  auto ASR track (can mis-hear words).
+    - ..._comparison.md              only when BOTH exist - read it to decide which to trust.
+    - Exact output paths are printed to stderr; parse those instead of re-deriving the slug.
+    - Owner convention: ANY video-transcript artifact - including transcript+screenshot/frame
+      pipeline folders built on top of this script's output - lives under this same
+      AI/support_scripts_work/transcripts/ area (one subfolder per video for frame pipelines).
+    - JSON shape: {video_id, video_url, title, channel, source, is_generated, language,
+      language_code, snippet_count, snippets: [{text, start, duration}]} - `start`/`duration`
+      are seconds; `source` ("manual"|"generated") matches the file-name suffix; `channel` is
+      the uploader's channel name as YouTube reports it.
+  Exit codes / failure triage (all errors print one `error: ...` line to stderr, exit 1)
+    - "Socket blocked (WinError 10013 / EACCES)": the OS refused the connection for THIS
+      interpreter. Causes, in likelihood order: (a) you are in a sandboxed shell that blocks
+      child-process networking - rerun without the sandbox; (b) Windows Firewall with a
+      default-Block outbound policy and no allow rule matching this exact python.exe. Firewall
+      app rules bind to the resolved NT device path, so a disk/volume migration silently
+      invalidates a rule even when its displayed path still looks correct - re-save the rule
+      (elevated: `Set-NetFirewallRule -DisplayName <rule> -Program <exe>`) or add one for the
+      interpreter you are using. Confirm the split with PowerShell `Test-NetConnection
+      www.youtube.com -Port 443` (succeeds) vs this script (fails).
+    - HTTP 429 / reCAPTCHA / "requires sign-in": YouTube is blocking this IP. Not a code or
+      host problem - wait or switch networks; retrying immediately will not help.
+    - "no transcripts/captions available": the video genuinely has none (or only non-English);
+      run `--list` before concluding failure.
+  Etiquette: one video per invocation; do not loop this over many videos rapid-fire - that is
+  what triggers the 429/reCAPTCHA path above.
 """
 from __future__ import annotations
 
@@ -33,16 +75,19 @@ import json
 import re
 import sys
 import textwrap
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from html import unescape
 from pathlib import Path
+from typing import Optional
 from xml.etree import ElementTree
 
 WATCH_URL = "https://www.youtube.com/watch?v={video_id}"
 PLAYER_URL = "https://www.youtube.com/youtubei/v1/player?key={api_key}"
-# The mobile client context is what YouTube hands caption tracks to without an extra token.
+# The mobile client context is what YouTube hands caption tracks to without an extra token. YouTube
+# periodically retires client versions, so update this value if otherwise-valid player calls fail.
 INNERTUBE_CONTEXT = {"client": {"clientName": "ANDROID", "clientVersion": "20.10.38"}}
 HEADERS = {
     "User-Agent": (
@@ -56,10 +101,53 @@ _API_KEY_RE = re.compile(r'"INNERTUBE_API_KEY":\s*"([A-Za-z0-9_-]+)"')
 _CONSENT_V_RE = re.compile(r'name="v" value="(.*?)"')
 _TAG_RE = re.compile(r"<[^>]*>")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def sanitize_title(title: str, max_len: int = 60) -> str:
+    """Deterministically slugify a video title for use in output file names.
+
+    Pure function of its input - no timestamps, counters, or randomness - so the same title
+    always produces the same slug (re-runs overwrite rather than accumulate). Pipeline:
+    NFKD-normalize, drop non-ASCII (emoji, CJK, accents' combining marks), lowercase, collapse
+    every non-alphanumeric run to a single "-", trim, and cap at `max_len` on a word boundary.
+    Returns "" for titles with no ASCII alphanumerics; callers fall back to the bare video ID.
+    """
+    ascii_text = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    slug = _SLUG_RE.sub("-", ascii_text.lower()).strip("-")
+    if len(slug) > max_len:
+        cut = slug[:max_len]
+        slug = cut.rsplit("-", 1)[0] if "-" in cut else cut
+    return slug
 
 
 class TranscriptError(Exception):
     """A user-facing failure (bad input, video unavailable, disabled, IP-blocked, etc.)."""
+
+
+def _blocked_socket_error() -> "TranscriptError":
+    """Explain a WinError 10013 / EACCES socket denial instead of echoing the bare errno.
+
+    This is an OS-level per-process denial, not a YouTube-side failure: either the current
+    shell is sandboxed (agent harnesses commonly block child-process networking), or a
+    per-executable firewall rule does not match this interpreter. On Windows a default-Block
+    outbound policy needs an allow rule per exe, and those rules bind to the NT device path -
+    a disk/volume migration invalidates them while their displayed path still looks right.
+    """
+    return TranscriptError(
+        "Socket blocked (WinError 10013 / EACCES): this host denied outbound network access to "
+        "this interpreter ({0}). Likely causes: a sandboxed shell blocking child-process "
+        "networking, or a Windows Firewall default-Block outbound policy whose allow rule does "
+        "not match this exe (rules go stale after a disk/volume migration - re-save the rule). "
+        "Triage: PowerShell `Test-NetConnection www.youtube.com -Port 443` succeeding while this "
+        "script fails confirms a per-exe block.".format(sys.executable)
+    )
+
+
+def _is_blocked_socket(err: OSError) -> bool:
+    """Return whether an OS error is a Windows WSAEACCES or POSIX EACCES socket denial."""
+    # WSAEACCES on Windows surfaces as winerror 10013; POSIX sandboxes raise plain EACCES (13).
+    return getattr(err, "winerror", None) == 10013 or getattr(err, "errno", None) == 13
 
 
 # --------------------------------------------------------------------------- input
@@ -105,7 +193,10 @@ def _set_cookie(jar: http.cookiejar.CookieJar, name: str, value: str) -> None:
     ))
 
 
-def _request(opener, url: str, data: bytes = None, content_type: str = None) -> str:
+def _request(
+    opener, url: str, data: Optional[bytes] = None, content_type: Optional[str] = None
+) -> str:
+    """Issue GET/POST and map HTTP, URL, and socket failures to concise TranscriptError messages."""
     headers = dict(HEADERS)
     if content_type:
         headers["Content-Type"] = content_type
@@ -122,7 +213,13 @@ def _request(opener, url: str, data: bytes = None, content_type: str = None) -> 
             )
         raise TranscriptError("YouTube request failed (HTTP {0}).".format(err.code))
     except urllib.error.URLError as err:
+        if isinstance(err.reason, OSError) and _is_blocked_socket(err.reason):
+            raise _blocked_socket_error()
         raise TranscriptError("Network error: {0}".format(err.reason))
+    except OSError as err:  # raised directly (not URLError-wrapped) on some connect paths
+        if _is_blocked_socket(err):
+            raise _blocked_socket_error()
+        raise TranscriptError("Network error: {0}".format(err))
 
 
 def _get(opener, url: str) -> str:
@@ -141,6 +238,7 @@ def _post_json(opener, url: str, payload: dict) -> dict:
 # --------------------------------------------------------------------------- fetch flow
 
 def fetch_watch_html(opener, jar, video_id: str) -> str:
+    """Fetch a watch page, retrying once with a derived YouTube consent cookie when required."""
     url = WATCH_URL.format(video_id=video_id)
     html = unescape(_get(opener, url))
     if 'action="https://consent.youtube.com/s"' in html:
@@ -169,10 +267,12 @@ def fetch_player(opener, video_id: str, api_key: str) -> dict:
 
 
 def extract_caption_tracks(player: dict, video_id: str) -> list:
+    """Return caption tracks or raise for blocking playability states and missing captions."""
     status = player.get("playabilityStatus") or {}
     state = status.get("status")
-    if state and state != "OK":
-        reason = status.get("reason") or state
+    reason = status.get("reason")
+    if (state and state != "OK") or (not state and reason):
+        reason = reason or state
         lowered = reason.lower()
         if "bot" in lowered or (state == "LOGIN_REQUIRED" and "sign in" in lowered):
             raise TranscriptError("YouTube requires sign-in (bot detection) for this video.")
@@ -193,8 +293,13 @@ def _track_name(track: dict) -> str:
         return track.get("languageCode", "")
 
 
-def _english(tracks: list, generated: bool) -> dict:
-    """Pick the best English track of the requested kind (exact 'en' preferred over 'en-US' etc.)."""
+def _english(tracks: list, generated: bool) -> Optional[dict]:
+    """Pick the best English track of the requested kind (exact 'en' preferred over 'en-US' etc.).
+
+    Agent note: `kind == "asr"` marks the auto-generated (speech-recognition) track; manual
+    creator-uploaded tracks have no `kind`. Returns None when the requested kind has no
+    English track - that is normal (most videos carry only one of the two).
+    """
     matches = [
         t for t in tracks
         if t.get("languageCode", "").lower().startswith("en")
@@ -208,32 +313,57 @@ def _english(tracks: list, generated: bool) -> dict:
     return matches[0]
 
 
+def _strip_srv3_format(url: str) -> str:
+    """Remove an exact fmt=srv3 query item without reordering or decoding signed parameters."""
+    return re.sub(
+        r"([?&])fmt=srv3(?:&|$)",
+        lambda match: match.group(1) if match.group(0).endswith("&") else "",
+        url,
+    )
+
+
 def fetch_snippets(opener, track: dict) -> list:
-    url = track["baseUrl"].replace("&fmt=srv3", "")
+    """Fetch timed-text XML and return text/start/duration snippets, rejecting PoToken tracks."""
+    # Strip fmt=srv3 so YouTube serves the plain timedtext XML this parser expects.
+    url = track.get("baseUrl")
+    if not url:
+        raise TranscriptError("The selected caption track has no timedtext URL.")
+    url = _strip_srv3_format(url)
     if "&exp=xpe" in url:
+        # exp=xpe tracks demand a proof-of-origin token we cannot mint; unrecoverable here.
         raise TranscriptError("This transcript requires a PoToken and cannot be fetched without one.")
     # The timedtext payload is YouTube's own small XML document (no DTD); parse with the stdlib.
     xml = _get(opener, url)
+    xml = re.sub(r"^\ufeff?\s*<\?xml[^>]*\?>", "", xml, count=1)
     try:
         root = ElementTree.fromstring(xml)
-    except ElementTree.ParseError as err:
+    except (ElementTree.ParseError, ValueError) as err:
         raise TranscriptError("Could not parse the transcript XML: {0}".format(err))
     snippets = []
     for element in root:
-        if element.text is None:
+        text = "".join(element.itertext())
+        if not text:
             continue
+        try:
+            start = round(float(element.attrib.get("start", "0.0")), 3)
+            duration = round(float(element.attrib.get("dur", "0.0")), 3)
+        except (TypeError, ValueError) as err:
+            raise TranscriptError("Invalid transcript timing value: {0}".format(err))
         snippets.append({
-            "text": _TAG_RE.sub("", unescape(element.text)),
-            "start": round(float(element.attrib.get("start", "0.0")), 3),
-            "duration": round(float(element.attrib.get("dur", "0.0")), 3),
+            "text": _TAG_RE.sub("", unescape(text)),
+            "start": start,
+            "duration": duration,
         })
     return snippets
 
 
-def build_transcript(track: dict, snippets: list, video_id: str, source: str) -> dict:
+def build_transcript(track: dict, snippets: list, video_id: str, source: str,
+                     title: str, channel: str) -> dict:
     return {
         "video_id": video_id,
         "video_url": "https://www.youtube.com/watch?v={0}".format(video_id),
+        "title": title,                         # verbatim video title (file names use its slug)
+        "channel": channel,                     # uploader's channel name (videoDetails.author)
         "source": source,                       # "manual" (creator-uploaded) or "generated" (ASR)
         "is_generated": track.get("kind") == "asr",
         "language": _track_name(track),
@@ -352,11 +482,19 @@ def main(argv=None) -> int:
         out_dir = Path(args.out_dir) if args.out_dir else default_out_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # File-name stem: "<title-slug>_<video_id>", or just the ID when the title slugs to "".
+        details = player.get("videoDetails") or {}
+        title = (details.get("title") or "").strip()
+        channel = (details.get("author") or "").strip()   # uploader's channel name
+        slug = sanitize_title(title)
+        stem = "{0}_{1}".format(slug, video_id) if slug else video_id
+
         results, written = {}, []
         for label, track in found:
-            transcript = build_transcript(track, fetch_snippets(opener, track), video_id, label)
+            transcript = build_transcript(track, fetch_snippets(opener, track), video_id, label,
+                                          title, channel)
             results[label] = transcript
-            path = out_dir / "{0}.{1}.json".format(video_id, label)
+            path = out_dir / "{0}_{1}_transcript.json".format(stem, label)
             path.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
             written.append(path)
             if args.to_stdout:
@@ -364,7 +502,7 @@ def main(argv=None) -> int:
 
         if "manual" in results and "generated" in results:
             report = build_comparison(results["manual"], results["generated"], video_id)
-            path = out_dir / "{0}.comparison.md".format(video_id)
+            path = out_dir / "{0}_comparison.md".format(stem)
             path.write_text(report, encoding="utf-8")
             written.append(path)
 

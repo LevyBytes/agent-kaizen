@@ -1,0 +1,400 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     width="256"
+     height="256"
+     role="img"
+     aria-labelledby="title desc"
+     shape-rendering="geometricPrecision">
+
+  <title id="title">Agent Kaizen Logo</title>
+
+  <desc id="desc">
+    Agent Kaizen is an open source, local-first agentic engineering framework
+    and harness for AI coding agents in VS Code and other supported code editors:
+    a five-layer method (SAVMI - Scope, Adapt, Verify, Manage, Improve) plus a
+    92-operation CLI that writes every task, plan, go/no-go verification,
+    artifact hash, and validated lesson to one queryable SQLite-compatible
+    (Turso/libSQL) database on your machine. Auditable agent memory and session
+    continuity for Claude Code, Codex, and other agent hosts, built on recorded
+    evidence instead of chat recollection.
+  </desc>
+
+  <defs>
+    <path id="kShape"
+          d="
+            M 232.04 12.00
+            L 177.03 41.90
+            L 185.40 31.13
+            L 102.89 89.73
+            L 119.63 34.72
+            L 113.65 33.53
+            L 118.43 17.98
+            L 110.06 26.35
+            L 104.08 22.76
+            L 106.47 13.20
+            L 84.95 33.53
+            L 55.05 116.04
+            L 40.70 124.41
+            L 35.92 141.15
+            L 45.48 144.74
+            L 22.76 230.85
+            L 32.33 210.52
+            L 41.90 217.69
+            L 51.46 202.14
+            L 51.46 214.10
+            L 84.95 136.37
+            L 150.72 206.93
+            L 177.03 228.45
+            L 172.25 214.10
+            L 205.73 242.80
+            L 196.16 220.08
+            L 116.04 113.65
+            L 210.52 47.88
+            L 196.16 51.46
+            L 224.87 29.94
+            L 212.91 37.11
+            L 204.54 31.13
+            Z
+          "/>
+
+    <clipPath id="clipK">
+      <use href="#kShape"/>
+    </clipPath>
+
+    <linearGradient id="base"
+                    x1="0.06"
+                    y1="0.02"
+                    x2="0.94"
+                    y2="1">
+      <stop offset="0" stop-color="#48E5FF"/>
+      <stop offset="0.20" stop-color="#12AFFF"/>
+      <stop offset="0.48" stop-color="#086EE5"/>
+      <stop offset="0.76" stop-color="#073CA7"/>
+      <stop offset="1" stop-color="#020B32"/>
+    </linearGradient>
+
+    <linearGradient id="stemFace"
+                    x1="0"
+                    y1="0"
+                    x2="0.82"
+                    y2="1">
+      <stop offset="0" stop-color="#77F2FF" stop-opacity="0.92"/>
+      <stop offset="0.34" stop-color="#22C8FF" stop-opacity="0.75"/>
+      <stop offset="0.72" stop-color="#0874E5" stop-opacity="0.40"/>
+      <stop offset="1" stop-color="#041653" stop-opacity="0.16"/>
+    </linearGradient>
+
+    <linearGradient id="upperFace"
+                    x1="0.04"
+                    y1="0.08"
+                    x2="0.98"
+                    y2="0.88">
+      <stop offset="0" stop-color="#33D6FF" stop-opacity="0.84"/>
+      <stop offset="0.45" stop-color="#0A86F5" stop-opacity="0.66"/>
+      <stop offset="1" stop-color="#031344" stop-opacity="0.88"/>
+    </linearGradient>
+
+    <linearGradient id="lowerFace"
+                    x1="0.05"
+                    y1="0"
+                    x2="0.96"
+                    y2="1">
+      <stop offset="0" stop-color="#2ED3FF" stop-opacity="0.65"/>
+      <stop offset="0.42" stop-color="#075FD7" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#010825" stop-opacity="0.96"/>
+    </linearGradient>
+
+    <linearGradient id="edge"
+                    x1="0"
+                    y1="0"
+                    x2="1"
+                    y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.18" stop-color="#D8FFFF"/>
+      <stop offset="0.58" stop-color="#5DE4FF"/>
+      <stop offset="1" stop-color="#0B73FF"/>
+    </linearGradient>
+
+    <radialGradient id="jointCore"
+                    cx="50%"
+                    cy="50%"
+                    r="50%">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.96"/>
+      <stop offset="0.13" stop-color="#C9FFFF" stop-opacity="0.82"/>
+      <stop offset="0.34" stop-color="#2CD8FF" stop-opacity="0.48"/>
+      <stop offset="0.72" stop-color="#087DFF" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#087DFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="coreBlur"
+            x="-25%"
+            y="-25%"
+            width="150%"
+            height="150%">
+      <feGaussianBlur stdDeviation="2.8"/>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#clipK)">
+    <rect width="256"
+          height="256"
+          fill="url(#base)"/>
+
+    <!-- Main forged blade planes -->
+
+    <path d="
+            M 105 1
+            L 124 16
+            L 96 117
+            L 69 188
+            L 37 249
+            L 13 256
+            L 53 114
+            Z
+          "
+          fill="url(#stemFace)"/>
+
+    <path d="
+            M 82 34
+            L 106 10
+            L 89 117
+            L 56 204
+            L 69 116
+            Z
+          "
+          fill="#02195E"
+          opacity="0.52"/>
+
+    <path d="
+            M 89 128
+            L 102 87
+            L 245 -3
+            L 211 48
+            L 116 117
+            Z
+          "
+          fill="url(#upperFace)"/>
+
+    <!-- Adjusted upper dark facet -->
+    <path d="
+            M 108 121
+            L 190 51
+            L 241 4
+            L 208 48
+            L 116.04 113.65
+            Z
+          "
+          fill="#01103D"
+          opacity="0.58"/>
+
+    <path d="
+            M 83 137
+            L 115 111
+            L 223 251
+            L 178 229
+            L 148 207
+            Z
+          "
+          fill="url(#lowerFace)"/>
+
+    <!-- Adjusted lower dark facet -->
+    <path d="
+            M 104 130
+            L 108 121
+            L 116.04 113.65
+            L 216 249
+            L 174 217
+            Z
+          "
+          fill="#010B34"
+          opacity="0.50"/>
+
+    <!-- Long polished blade highlights -->
+
+    <g fill="none"
+       stroke-linecap="square"
+       stroke-linejoin="miter">
+
+      <path d="
+              M 106 13
+              C 95 54 82 106 69 154
+              C 57 198 44 225 31 245
+            "
+            stroke="#9CF4FF"
+            stroke-width="3.2"
+            opacity="0.10"/>
+
+      <path d="
+              M 106 13
+              C 95 54 82 106 69 154
+              C 57 198 44 225 31 245
+            "
+            stroke="url(#edge)"
+            stroke-width="1.30"
+            opacity="0.98"/>
+
+      <path d="
+              M 89 125
+              C 126 103 165 73 231 15
+            "
+            stroke="#7BEAFF"
+            stroke-width="2.8"
+            opacity="0.08"/>
+
+      <path d="
+              M 89 125
+              C 126 103 165 73 231 15
+            "
+            stroke="url(#edge)"
+            stroke-width="1.20"
+            opacity="0.94"/>
+
+      <path d="
+              M 93 136
+              C 127 160 159 192 205 238
+            "
+            stroke="#60DFFF"
+            stroke-width="2.6"
+            opacity="0.07"/>
+
+      <path d="
+              M 93 136
+              C 127 160 159 192 205 238
+            "
+            stroke="url(#edge)"
+            stroke-width="1.05"
+            opacity="0.80"/>
+    </g>
+
+    <!-- Contained electric fissures -->
+
+    <g fill="none"
+       stroke-linecap="square"
+       stroke-linejoin="miter">
+
+      <path d="
+              M 34 219
+              L 48 202
+              L 46 190
+              L 58 178
+              L 62 160
+              L 74 149
+              L 79 131
+            "
+            stroke="#E6FFFF"
+            stroke-width="1.00"
+            opacity="0.96"/>
+
+      <path d="
+              M 48 202
+              L 59 196
+              L 65 184
+            "
+            stroke="#5DE3FF"
+            stroke-width="0.56"
+            opacity="0.84"/>
+
+      <path d="
+              M 58 178
+              L 52 168
+              L 56 157
+            "
+            stroke="#73E8FF"
+            stroke-width="0.54"
+            opacity="0.78"/>
+
+      <path d="
+              M 96 120
+              L 112 109
+              L 123 97
+              L 139 90
+              L 153 76
+              L 171 68
+            "
+            stroke="#E9FFFF"
+            stroke-width="0.92"
+            opacity="0.92"/>
+
+      <path d="
+              M 123 97
+              L 134 100
+              L 145 92
+            "
+            stroke="#61E2FF"
+            stroke-width="0.56"
+            opacity="0.80"/>
+
+      <path d="
+              M 139 90
+              L 141 80
+              L 151 73
+            "
+            stroke="#70E7FF"
+            stroke-width="0.54"
+            opacity="0.74"/>
+
+      <path d="
+              M 110 151
+              L 126 162
+              L 136 176
+              L 151 184
+              L 164 199
+              L 181 211
+            "
+            stroke="#E2FFFF"
+            stroke-width="0.98"
+            opacity="0.90"/>
+
+      <path d="
+              M 136 176
+              L 149 173
+              L 159 182
+            "
+            stroke="#5BDFFF"
+            stroke-width="0.56"
+            opacity="0.78"/>
+
+      <path d="
+              M 164 199
+              L 176 196
+              L 185 205
+            "
+            stroke="#69E4FF"
+            stroke-width="0.54"
+            opacity="0.72"/>
+    </g>
+
+    <!-- Contained energy at the central joint -->
+
+    <ellipse cx="94"
+             cy="133"
+             rx="22"
+             ry="19"
+             fill="url(#jointCore)"
+             opacity="0.30"
+             filter="url(#coreBlur)"/>
+
+    <ellipse cx="94"
+             cy="133"
+             rx="8"
+             ry="7"
+             fill="url(#jointCore)"
+             opacity="0.42"/>
+
+    <!-- Inner outline only -->
+
+    <use href="#kShape"
+         fill="none"
+         stroke="#B8FAFF"
+         stroke-width="2.2"
+         stroke-linejoin="miter"
+         opacity="0.58"/>
+
+    <use href="#kShape"
+         fill="none"
+         stroke="#1186FF"
+         stroke-width="0.70"
+         stroke-linejoin="miter"
+         opacity="0.72"/>
+  </g>
+</svg>

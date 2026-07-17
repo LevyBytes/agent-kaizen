@@ -31,6 +31,7 @@ Proof is in the pudding: record writes land in under 30 ms, a full session-start
   - [The Kaizen System](#the-kaizen-system)
   - [How The Repo Maps To The System](#how-the-repo-maps-to-the-system)
   - [What This Repo Provides](#what-this-repo-provides)
+  - [Harness Daemon And VS Code Controller](#harness-daemon-and-vs-code-controller)
   - [Why Not Just Built-In Agent Memory?](#why-not-just-built-in-agent-memory)
   - [Does It Actually Pay Off?](#does-it-actually-pay-off)
   - [Why AGPL](#why-agpl)
@@ -57,6 +58,7 @@ Proof is in the pudding: record writes land in under 30 ms, a full session-start
   - [Optional Backends](#optional-backends)
   - [FAQ](#faq)
   - [Public Repository Safety](#public-repository-safety)
+  - [Contributing](#contributing)
   - [License](#license)
 
 ## Reading Path
@@ -64,7 +66,7 @@ Proof is in the pudding: record writes land in under 30 ms, a full session-start
 - New to the idea: read this intro, then [`Kaizen_System.md`](Kaizen_System.md).
 - Installing it: download and run the one-file installer for your platform from the repo's `setup/` folder (see **Setup** below).
 - Using this repo with an agent: have your agent read [`setup/SETUP.md`](setup/SETUP.md), then **Daily Workflow**.
-- Extending the harness: read [`support_scripts/README.md`](support_scripts/README.md).
+- Using the optional auxiliary utilities: read [`support_scripts/README.md`](support_scripts/README.md).
 - Adapting the system elsewhere: use **Adopting Agent Kaizen In A Project** as the starting point.
 
 ## The Kaizen System
@@ -97,7 +99,10 @@ The master concept document is [`Kaizen_System.md`](Kaizen_System.md). This READ
 | `setup/`                           | Install/bootstrap scripts and the agent manual `SETUP.md` |
 | `.agents/skills`, `.claude/skills` | Junction surfaces to external skill packages              |
 | `kaizen_components/`               | The shared engine package behind `kaizen.py`              |
+| `tests/`                           | Tests, benchmarks, verification, and acceptance sources   |
 | `support_scripts/`                 | Auxiliary helper scripts; scratch belongs under `AI/`     |
+| `kaizen_components/orchestration/` | Supervisor, policy snapshots, adapters, hooks, and replay  |
+| `extension/`                       | VS Code sidebar/popout controller over the local daemon    |
 
 The important split is simple:
 
@@ -129,6 +134,57 @@ Every agent host writes through one CLI into one database; the next session — 
 - VS Code project-shape guidance for Codex, Claude Code, and similar coding agents.
 - Deterministic scripts that move repetitive mechanics out of the model context window.
 - A transcript-mining helper (`support_scripts/mine_transcripts.py`) that drafts GOTCHA candidates from your own agent session logs — read-only on transcripts, human-reviewed, and promoted only through the normal `G1` write gate.
+- A multi-turn supervisor conversation with durable event replay, immutable permission profiles, and exactly one successful finalization on explicit close.
+- A zero-runtime-dependency VS Code controller with editor-tab conversations, durable daemon replay, governed tools, and an isolated Test Extension acceptance surface.
+
+## Harness Daemon And VS Code Controller
+
+The optional controller UI is in [`extension/`](extension/README.md). Each editor-tab conversation has its own controller while the daemon remains authoritative for transcript and policy state. Closing a renderer does not stop its daemon run, and reopening receives a complete snapshot rebuilt from durable events. The sidebar remains the approvals, sessions/timeline, and fleet/engines navigator rather than a second chat surface.
+
+The conversation lifecycle is deliberately longer than one model turn:
+
+```text
+open -> running -> idle -> running -> ... -> explicit close -> terminal
+```
+
+One C1 session and one T5 run remain open across turns. Complete redacted user and final assistant messages are written as `chat_message/point` events. A successful T8 is written only by `session/close`; kill, fatal errors, shutdown, and orphan recovery write a non-success finalization. The UI persists only `session_id`, `agent_run_id`, and `profile_hash`, never transcript text, API keys, approval secrets, or Full-mode confirmation.
+
+The equivalent CLI surface is scriptable:
+
+```text
+python kaizen.py daemon session capabilities --json
+python kaizen.py daemon session start --engine local_llm --prompt "First turn" --permission-mode plan --json
+python kaizen.py daemon session turn --run <agent_run_id> --prompt "Second turn" --json
+python kaizen.py daemon session close --run <agent_run_id> --json
+```
+
+Engine selectors come from `session/capabilities`; `claude_cli` is normalized to the public `claude` ID. An engine remains visible but non-drivable when the installed vendor version cannot enforce the requested permission boundary. There is no silent downgrade: unsupported profiles return structured denials. Claude uses only a separately installed, pinned official SDK runtime and a pre-existing vendor-managed subscription identity. The UI never accepts credential text, Kaizen never reads vendor credential files, and there is no Claude API-key fallback.
+
+Claude runtime management is explicit and never occurs when the daemon or extension starts. Setup installs it only when selected with Windows `-WithClaudeRuntime`, POSIX `--with-claude-runtime`, or `AK_WITH_CLAUDE_RUNTIME`; the default is off and CLI selection overrides the environment. The selection remains effective with `-NoDevTools` / `--no-dev-tools` because it is a provider-runtime choice, requires the exact managed Node/npm pair under `DEVROOT`, and performs no login or credential setup. `check` is offline and emits only a path-free capability result; `install` is enabled only when the repository contains an exact audited lock, keeps npm cache/config/temp and the versioned runtime under local managed roots, and reuses a valid warm runtime without package-manager work:
+
+```text
+python setup/claude_runtime_setup.py check
+python setup/claude_runtime_setup.py install
+```
+
+An explicitly selected warm runtime succeeds under `-NoNetwork` / `--no-network`; a selected cold setup fails before npm. `install` fails closed when the audited lock, bundled native dependency, exact managed Node/npm installation, or post-install integrity checks are unavailable. It performs no login and handles no credentials. The VSIX contains none of the SDK, native runtime, worker source, `node_modules`, caches, or runtime pointers.
+
+Publication risk (guidance reviewed 2026-07-12): Anthropic documents subscription-backed Agent SDK use while separately cautioning third-party developers against routing Free/Pro/Max credentials. Kaizen does not open or route credential files, but public distribution of this existing-subscription workflow still requires owner/legal review against the then-current [Claude plan SDK guidance](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) and [authentication/legal guidance](https://code.claude.com/docs/en/legal-and-compliance). This is a release-risk disclosure, not a claim of legal clearance.
+
+`Kaizen: Open Test Extension` (`kaizen.testExtension.open`) opens the approved Test Extension editor tab. Starting a suite is a second explicit action that opens a visible terminal runner, which owns a fresh isolated daemon and visible Extension Development Host. The authenticated real-Claude leg is user-launched; Ollama is a separate baseline, not a fallback. Results prove the selected bounded acceptance scenarios, not general OS containment.
+
+Claude sessions started outside Kaizen can be captured from the point the workspace hooks are installed:
+
+```text
+python kaizen.py daemon hooks install --mode hooked-observe --json
+python kaizen.py daemon hooks verify --json
+```
+
+Observed conversations reuse one C1 across host lifecycles and attach ordered T5 runs for startup/resume. `UserPromptSubmit` records the complete user message, `Stop` uses `last_assistant_message`, and no transcript JSONL is parsed. Observed conversations and their approval records are strictly display-only in the UI.
+
+The controller is an application-layer mediation system. Vendor sandboxes and supported approval channels are the enforcement backbone; hooks add defense in depth. Genuine OS/user/container isolation, hostile native programs, computed-path escapes, and kernel-level containment belong to a later isolation layer.
+
+Existing-target proposal modify, delete, and rename operations use the verified bounded crash-recovery path on Windows. A platform without equivalent proven primitives denies those operations before mutation; retained recovery artifacts support exact restart reconciliation, not filesystem transactionality, rollback, or broad OS containment.
 
 ## Why Not Just Built-In Agent Memory?
 
@@ -214,7 +270,7 @@ bash install-agent-kaizen.sh "$HOME/dev"
 
 Re-running is safe. On Windows, winget is optional — if it cannot be bootstrapped the installer downloads Git and Python straight from their official sites, so it still completes. If those direct installs also fail (or on an unsupported Linux distro), the installer prints the official [Git](https://git-scm.com/download/win) and [Python](https://www.python.org/downloads/) links — install those (tick "Add to PATH") and re-run. Already have the repo cloned? On Linux/macOS run `bash setup/setup.sh [DEVROOT]`; on Windows run `setup\Install-Agent-Kaizen.cmd`, which detects an existing clone and skips re-cloning.
 
-**Try it in Windows Sandbox first (optional).** A generic template is included at [`AI/tests/windows-sandbox-template.wsb`](AI/tests/windows-sandbox-template.wsb) — launch it to test the installer in a throwaway VM. The one thing a fresh Windows 11 sandbox needs is **Smart App Control disabled**, which the template's logon script does automatically (SAC Enforce otherwise blocks the per-user Python install). Keep any folder mappings minimal.
+**Try it in Windows Sandbox first (optional).** A generic template is included at [`tests/windows-sandbox-template.wsb`](tests/windows-sandbox-template.wsb) — launch it to test the installer in a throwaway VM. The one thing a fresh Windows 11 sandbox needs is **Smart App Control disabled**, which the template's logon script does automatically (SAC Enforce otherwise blocks the per-user Python install). Keep any folder mappings minimal.
 
 Installer planning and diagnostics:
 
@@ -294,21 +350,21 @@ npx prettier --write  path/to/file.md   # apply formatting
 
 ## Testing
 
-The harness ships with a standard-library `unittest` suite under [`AI/tests/`](AI/tests/). Each test runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it never reads or writes your real `AI/db/`. The suite spans 30 test modules (260+ tests), including a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a test, a parity suite that fails if the README command table drifts from the CLI alias map, and a doc-examples runner that executes every command example in this README against a scratch database. Run it with the project venv's Python:
+The harness ships with a standard-library `unittest` suite under [`tests/`](tests/). Each test runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it never reads or writes your real `AI/db/`. The suite includes a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a test, a parity suite that fails if the README command table drifts from the CLI alias map, and a doc-examples runner that executes every command example in this README against a scratch database. Run the canonical scratch-pinning wrapper with the shared Kaizen venv:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s AI/tests
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py
 ```
 
 ```sh
-./.venv/bin/python -m unittest discover -s AI/tests
+"$DEVROOT/Python/venvs/kaizen/bin/python" tests/run_tests.py
 ```
 
-See [`AI/tests/README.md`](AI/tests/README.md) for what each module covers.
+See [`tests/README.md`](tests/README.md) for what each module covers.
 
 ## Benchmarks
 
-Real numbers from the real code path: `support_scripts/bench_kaizen.py` times the CLI in-process (interpreter startup excluded) against an isolated scratch data plane — your `AI/db/` is never touched. Full methodology, tables, and charts: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Real numbers from the real code path: `tests/bench_kaizen.py` is benchmark infrastructure that times the CLI in-process (interpreter startup excluded) against an isolated scratch data plane — your `AI/db/` is never touched. Full methodology, tables, and charts: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ![Restoring session context: the R0 digest vs replaying a session transcript](docs/images/bench-context-recovery.svg)
 
@@ -316,7 +372,7 @@ Session context restored from records is about **28× cheaper** than replaying t
 
 ![Write-op latency, median milliseconds](docs/images/bench-write-latency.svg)
 
-Reference run: Windows-11-10.0.26200-SP0, AMD64, Python 3.12.10, pyturso 0.6.1. Regenerate with `python support_scripts/bench_kaizen.py`.
+Reference run: Windows-11-10.0.26200-SP0, AMD64, Python 3.12.10, pyturso 0.6.1. Regenerate with `python tests/bench_kaizen.py`.
 
 ## Daily Workflow
 
@@ -413,7 +469,7 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | Code  | Alias                      | Purpose                                |
 | ----- | -------------------------- | -------------------------------------- |
 | `K0`  | `op-find`                  | Find the right operation from intent   |
-| `K1`  | `db-check`                 | Check or initialize the DB             |
+| `K1`  | `check-init`               | Check or initialize the DB             |
 | `K2`  | `schema-status`            | Show schema status                     |
 | `K3`  | `db-backup`                | Back up DB files                       |
 | `K6`  | `db-manifest`              | Export a DB manifest                   |
@@ -520,13 +576,27 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `B5`  | `pii-scan`                 | Advisory PII scan (augments regex)     |
 | `B6`  | `model-monitor`            | Monitor live model backends            |
 | `B7`  | `embed-index`              | Manage per-model embedding indexes     |
+| `B8`  | `backend-registry`         | Manage remote model endpoints          |
+| `C1`  | `session-start`            | Create or resume an agent session      |
+| `C2`  | `instruction-add`          | Add a session user instruction         |
+| `C3`  | `goal-upsert`              | Create or update a session goal        |
+| `C4`  | `approval-upsert`          | Create or update an approval request   |
+| `C5`  | `session-timeline`         | Read a session's joined timeline       |
+| `C6`  | `mode-profile`             | Manage owner mode profiles             |
+| `D1`  | `node-register`            | Register this node in the fleet        |
+| `D2`  | `node-heartbeat`           | Record a fleet node heartbeat          |
+| `D4`  | `coordinator-claim`        | Claim, transfer, or release the coordinator role |
+| `D5`  | `lease-request`            | Request, grant, renew, release, or hand off a lease |
+| `D7`  | `remote-dispatch`          | Dispatch a run to a fleet node         |
+| `D8`  | `fleet-digest`             | Generate the fleet digest              |
+| `D9`  | `reconcile`                | Reconcile after isolation or node loss |
 
 ### Operational Flags And File Safety
 
 A few cross-cutting flags harden the ops that touch files or the schema:
 
 - **Repo-only paths by default.** File-taking ops (`A1`, `A2`, `E1`) accept only paths inside the repository, so records stay portable and free of machine-specific absolute paths. To ingest or hash a file outside the repo, pass `--allow-external`; the record then stores a sanitized origin (`external:<filename>` plus the content hash), never the absolute path.
-- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records (the schema ships no foreign-key constraints, so this is the integrity check).
+- **`K1 --integrity`** runs a read-only cross-table reference scan and reports any orphaned records (the schema has no foreign-key constraints, so referential integrity is not database-enforced; this scan is the check).
 - **`K1 --restamp-manifest`** reconciles the stored schema manifest hash after a benign additive engine update. Writes fail closed on manifest drift (a DDL change with no migration bump); this is the sanctioned way to clear that once you have confirmed the drift is expected.
 - **PDF ingestion is guarded**: size, page-count, encrypted, and no-extractable-text (scanned) PDFs are denied with a structured message rather than hanging or spiking memory.
 
@@ -629,7 +699,7 @@ Two rules hold no matter what you enable: skip every backend and the determinist
 
 ## FAQ
 
-**Does it phone home?** No. You will find zero mechanisms in this repo to send me — or anyone else — any of your data. I loathe the dystopian levels of user tracking that exist today. Nothing touches the network unless you deliberately configure an optional backend, and then only the endpoint you point it at.
+**Does it phone home?** Agent Kaizen has no product telemetry or fixed maintainer upload endpoint. The default single-user data plane is local, but network access is not limited to model backends: setup may download dependencies; explicitly enabled model, ComfyUI, and vendor-agent integrations contact their configured services; and configured fleet sync/control or Git remotes exchange data with operator-selected endpoints. Review a networked feature's configuration and data handling before enabling it.
 
 **Does AGPL make my project AGPL?** No — the license covers this harness's code, not your code or your records. See [Why AGPL](#why-agpl).
 
@@ -637,7 +707,7 @@ Two rules hold no matter what you enable: skip every backend and the determinist
 
 **Do I need Ollama, ComfyUI, or PyTorch?** No. The core harness is dependency-light; the optional backends light up extra capabilities only when you install and point at them.
 
-**Where does my data live?** In `AI/db/` inside the repo — local, private by default, and under your control. Nothing is uploaded anywhere.
+**Where does my data live?** Project records default to `AI/db/` inside the repo. Explicitly configured backends, vendor agents, fleet sync/control, and Git remotes can transmit operation-specific data to services or endpoints you select; that data then follows the selected service's policy.
 
 **Is it Windows-only?** No. The project is developed on Windows 11 Pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Linux.
 
@@ -652,6 +722,10 @@ Treat generated DB data, reports, local policy context, artifacts, and exports a
 - personal paths, machine names, tokens, credentials, and secret-like strings.
 
 Public tracked docs should explain the portable system and local harness, not private machine policy or user-specific operational constraints.
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to scope a change, run the tests, sign your commits (DCO), and open a pull request.
 
 ## License
 

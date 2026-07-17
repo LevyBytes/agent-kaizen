@@ -65,14 +65,14 @@ SCRIPT_VERSION = "0.1.0"
 
 
 class QuitRequested(Exception):
-    """Raised when the user types q/quit at any prompt to exit cleanly."""
+    """Raised when the user types :q/:quit at any prompt to exit cleanly."""
 
 
 class CliError(Exception):
     """Raised for noninteractive CLI errors that should print cleanly and exit non-zero."""
 
 
-# Sentinel returned by interview prompts when the user types b/back to go to
+# Sentinel returned by interview prompts when the user types :b/:back to go to
 # the previous question (only when the prompt was called with allow_back=True).
 BACK = object()
 MULTILINE_SENTINEL = "END"
@@ -98,7 +98,7 @@ DRAFTS_MARKER = "# ==== SESSION DRAFTS (latest answers per session; rewritten in
 HISTORY_MARKER = "# ==== RUN HISTORY (append-only; newest last) ===="
 DEVLOG_MARKER = "# ==== DEVELOPMENT LOG (append-only; decisions and actions per run) ===="
 
-# Single generate mode kept so the mode menu can still host the r/s/q commands
+# Single generate mode kept so the mode menu can still host the r/s/:q commands
 # and so RUN HISTORY lines stay forward-compatible with the sibling format.
 MODES = ("skill build prompt",)
 BACKUP_MODES = ("ask", "always", "never")
@@ -411,7 +411,7 @@ LABEL_BY_ATTR["subagent_review_policy"] = "subagent review policy"
 # excluded: the slug is validated separately, and sources are a structured
 # registry, not free text.
 KNOWN_FIELDS = tuple(attr for attr, _l, _e, _d in INTERVIEW_FIELDS) + (
-    "target_agents", "risk_level", "source_license", "parallelism", "skill_category",
+    "target_agents", "risk_level", "source_license", "build_intent", "parallelism", "skill_category",
     "memory_file_policy", "subagent_review_policy",
 )
 
@@ -458,6 +458,7 @@ Each entry MUST have exactly these keys and nothing else:
 }"""
 
 def _read_canonical_checker(filename: str) -> str:
+    """Read a bundled checker, or return the fallback instruction embedded in the prompt."""
     path = REPO_ROOT / ".agents" / "skills" / "skill-drafting" / "scripts" / filename
     try:
         return path.read_text(encoding="utf-8")
@@ -477,8 +478,7 @@ class SourceEntry:
     the registry survives quit/Continue. ``content_path`` (for URL sources)
     optionally points at a pre-fetched local copy; otherwise the generated prompt
     instructs the executing agent to fetch the URL and cache it under AI/work.
-    ``supply_at_draft`` is retained only for log back-compat and no longer gates
-    anything. Local sources must exist on disk; URL sources are always usable.
+    Local sources must exist on disk; URL sources are always usable.
     """
 
     label: str
@@ -488,7 +488,6 @@ class SourceEntry:
     trust: str = "unverified"
     intended_use: str = ""
     content_path: str = ""
-    supply_at_draft: bool = False
     approx_pages: int = 0
 
     def is_url(self) -> bool:
@@ -547,7 +546,6 @@ class SourceEntry:
                 ("trust", self.trust),
                 ("intended_use", self.intended_use),
                 ("content_path", self.content_path),
-                ("supply_at_draft", self.supply_at_draft),
                 ("approx_pages", self.approx_pages),
             )
         )
@@ -563,7 +561,6 @@ class SourceEntry:
             trust=str(data.get("trust", "unverified")).strip() or "unverified",
             intended_use=str(data.get("intended_use", "")).strip(),
             content_path=str(data.get("content_path", "")).strip(),
-            supply_at_draft=bool(data.get("supply_at_draft", False)),
             approx_pages=_coerce_page_count(data.get("approx_pages", 0)),
         )
 
@@ -734,9 +731,9 @@ def is_yes_no(value: str) -> bool:
 
 
 def read_line(prompt: str) -> str:
-    """Read one input line, raising QuitRequested when the user types q/quit."""
+    """Read one input line, raising QuitRequested for a prefixed quit command."""
     answer = input(prompt)
-    if answer.strip().lower() in {"q", "quit"}:
+    if answer.strip().lower() in {":q", ":quit"}:
         raise QuitRequested
     return answer
 
@@ -899,7 +896,6 @@ def default_seed_sources() -> list:
             priority="high",
             trust="official",
             intended_use="skill format, frontmatter, and authoring rules for Claude",
-            supply_at_draft=True,
         ),
         SourceEntry(
             label="Codex skills documentation",
@@ -908,7 +904,6 @@ def default_seed_sources() -> list:
             priority="high",
             trust="official",
             intended_use="skill discovery and format for Codex",
-            supply_at_draft=True,
         ),
     ]
 
@@ -1166,25 +1161,25 @@ def format_devlog_lines(
 
 # ---- Interview prompt primitives --------------------------------------------
 def ask_yes_no(prompt: str, default: str = "n", allow_back: bool = False):
-    """Ask a yes/no question; return True/False, or BACK when allow_back and the user types b."""
+    """Ask a yes/no question; return True/False, or BACK for a prefixed back command."""
     default = default.lower()
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
         answer = read_line(f"{prompt} [{default}]{suffix}: ").strip().lower()
-        if allow_back and answer in {"b", "back"}:
+        if allow_back and answer in {":b", ":back"}:
             return BACK
         value = default if answer == "" else answer
         if value in {"y", "yes"}:
             return True
         if value in {"n", "no"}:
             return False
-        print("Enter y or n (or q to quit).")
+        print("Enter y or n (or :q to quit).")
 
 
 def read_multiline_answer(sentinel: str = MULTILINE_SENTINEL) -> str:
     """Read a multi-line answer until a line equal to the sentinel, or EOF.
 
-    Reads literal text via input(), so q/b are not special inside it; caps total
+    Reads literal text via input(), so :q/:b are not special inside it; caps total
     size so a runaway paste cannot hang or exhaust memory; auto-closes on EOF so
     a missing terminator never blocks.
     """
@@ -1210,22 +1205,22 @@ def confirm_or_enter(label: str, explanation: str, default: str, allow_back: boo
     """Ask a free-text question in one step: keep the default or replace it.
 
     Enter keeps the shown default; typing anything makes that text the new value;
-    ``m`` opens a multi-line capture; ``b`` (when allow_back) returns BACK; ``q``
+    ``:m`` opens a multi-line capture; ``:b`` (when allow_back) returns BACK; ``:q``
     quits. Returns the value, or BACK.
     """
     print(f"\n{label}")
     for line in explanation.splitlines():
         print(f"  {line}")
     print(f"  current default: {default}")
-    help_text = "Enter=keep | type a value | m=multi-line"
+    help_text = "Enter=keep | type a value | :m=multi-line"
     if allow_back:
-        help_text += " | b=back"
-    help_text += " | q=quit"
+        help_text += " | :b=back"
+    help_text += " | :q=quit"
     answer = read_line(f"  {help_text}: ").strip()
     low = answer.lower()
-    if allow_back and low in {"b", "back"}:
+    if allow_back and low in {":b", ":back"}:
         return BACK
-    if low in {"m", "ml"}:
+    if low in {":m", ":ml"}:
         text = read_multiline_answer()
         return clean_for_log(text) if text.strip() else default
     return clean_for_log(answer) if answer else default
@@ -1234,17 +1229,17 @@ def confirm_or_enter(label: str, explanation: str, default: str, allow_back: boo
 def prompt_slug(default: str, name_hint: str, allow_back: bool = False):
     """Ask for a kebab-case skill slug, validating the charset before moving on.
 
-    Enter keeps the default; ``b`` (when allow_back) returns BACK; ``q`` quits.
+    Enter keeps the default; ``:b`` (when allow_back) returns BACK; ``:q`` quits.
     Re-asks until the value is a valid slug (lowercase letters, digits, hyphens).
     """
     print("\nSkill slug (folder name under .agents/skills/)")
     print("  Lowercase letters, digits, and single hyphens only, e.g. my-skill.")
     suggested = default if SLUG_RE.match(default) else slugify(name_hint or default)
     print(f"  current default: {suggested}")
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
-        answer = read_line(f"  Enter=keep | type a slug{suffix} | q=quit: ").strip()
-        if allow_back and answer.lower() in {"b", "back"}:
+        answer = read_line(f"  Enter=keep | type a slug{suffix} | :q=quit: ").strip()
+        if allow_back and answer.lower() in {":b", ":back"}:
             return BACK
         candidate = suggested if answer == "" else answer.strip().lower()
         if SLUG_RE.match(candidate):
@@ -1282,16 +1277,16 @@ def prompt_path(label: str, explanation: str, default: str, allow_back: bool = F
 
     Rejects a bare y/n (a confirm habit), validates the path, and reports the
     resolved folder and whether it exists, re-asking until the value is usable.
-    Enter keeps the default; b (when allow_back) returns BACK; q quits.
+    Enter keeps the default; :b (when allow_back) returns BACK; :q quits.
     """
     print(f"\n{label}")
     for line in explanation.splitlines():
         print(f"  {line}")
     print(f"  current default: {default}")
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
-        answer = read_line(f"  Enter=keep | type a folder path{suffix} | q=quit: ").strip()
-        if allow_back and answer.lower() in {"b", "back"}:
+        answer = read_line(f"  Enter=keep | type a folder path{suffix} | :q=quit: ").strip()
+        if allow_back and answer.lower() in {":b", ":back"}:
             return BACK
         if answer.lower() in CONFIRM_TOKENS:
             print(
@@ -1315,7 +1310,7 @@ def prompt_menu(
 ):
     """Ask a choice question selectable by number, letter, or full value.
 
-    Returns the chosen value, or BACK when allow_back and the user types b.
+    Returns the chosen value, or BACK when allow_back and the user types :b.
     """
     print(f"\n{label}")
     if explanation:
@@ -1323,10 +1318,10 @@ def prompt_menu(
     for index, (value, keys, desc) in enumerate(options, start=1):
         keylabel = " / ".join((str(index),) + keys)
         print(f"  {keylabel} - {value}: {desc}")
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
-        answer = read_line(f"  {label} [{default}] (q=quit{suffix}): ").strip().lower()
-        if allow_back and answer in {"b", "back"}:
+        answer = read_line(f"  {label} [{default}] (:q=quit{suffix}): ").strip().lower()
+        if allow_back and answer in {":b", ":back"}:
             return BACK
         if answer == "":
             return default
@@ -1337,15 +1332,15 @@ def prompt_menu(
 
 
 def prompt_toggle(label: str, explanation: str, default: str, allow_back: bool = False):
-    """Ask an on/off setting; return 'on'/'off', or BACK when allow_back and the user types b."""
+    """Ask an on/off setting; return 'on'/'off', or BACK for a prefixed back command."""
     print(f"\n{label}")
     if explanation:
         print(f"  {explanation}")
     shown = "on" if default == "on" else "off"
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
-        answer = read_line(f"  {label} [{shown}] (on/off or y/n{suffix}, q=quit): ").strip().lower()
-        if allow_back and answer in {"b", "back"}:
+        answer = read_line(f"  {label} [{shown}] (on/off or y/n{suffix}, :q=quit): ").strip().lower()
+        if allow_back and answer in {":b", ":back"}:
             return BACK
         if answer == "":
             return default
@@ -1373,12 +1368,12 @@ def prompt_backup_mode(default: str, allow_back: bool = False):
     """Ask the backup mode (ask/always/never or y/n); return the mode, or BACK."""
     print("\nbackup_mode")
     print("  Backups save a Markdown copy of each generated prompt so you can reread it later.")
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
         answer = read_line(
-            f"  backup_mode [{default}] (ask / always / never, or y=always / n=never{suffix}, q=quit): "
+            f"  backup_mode [{default}] (ask / always / never, or y=always / n=never{suffix}, :q=quit): "
         ).strip().lower()
-        if allow_back and answer in {"b", "back"}:
+        if allow_back and answer in {":b", ":back"}:
             return BACK
         if answer == "":
             return default
@@ -1394,10 +1389,10 @@ def prompt_backup_mode(default: str, allow_back: bool = False):
 def walk_settings(settings: OrderedDict[str, str]) -> tuple[OrderedDict[str, str], bool]:
     """Let the user review and change persistent settings (mode is skipped).
 
-    Navigable: b steps back to the previous setting; b at the first setting exits settings.
+    Navigable: :b steps back to the previous setting; :b at the first setting exits settings.
     """
     updated = OrderedDict(settings)
-    print("Settings: answer each question; b=back, q=quit.")
+    print("Settings: answer each question; :b=back, :q=quit.")
     keys = [k for k in SETTING_KEYS if k != "mode"]
     i = 0
     while i < len(keys):
@@ -1610,7 +1605,6 @@ def ask_source_location_for_url(src: SourceEntry):
         if content:
             print(f"  No file found at {content}; not recorded — the agent will fetch the URL.")
         src.content_path = ""
-    src.supply_at_draft = True  # retained for log back-compat; no longer gates anything
     return True
 
 
@@ -1676,7 +1670,6 @@ def collect_source_location(src: SourceEntry):
             continue
         if anyway:
             src.content_path = ""
-            src.supply_at_draft = False
             ask_pdf_pages(src)
             return True
         reenter = ask_yes_no("  Re-enter the location?", "y", allow_back=True)
@@ -1687,12 +1680,12 @@ def collect_source_location(src: SourceEntry):
 
 
 def build_source_interactively(existing: SourceEntry | None = None) -> SourceEntry | None:
-    """Collect one source step by step; b steps back, b at the first step cancels (returns None)."""
+    """Collect one source step by step; :b steps back, and :b at the first step cancels."""
     base = existing or SourceEntry(label="", stype="note", location="")
     src = SourceEntry(
         label=base.label, stype=base.stype, location=base.location,
         priority=base.priority, trust=base.trust, intended_use=base.intended_use,
-        content_path=base.content_path, supply_at_draft=base.supply_at_draft,
+        content_path=base.content_path,
         approx_pages=base.approx_pages,
     )
     steps = ("label", "stype", "location", "priority", "trust", "intended_use")
@@ -1777,7 +1770,7 @@ def manage_source_registry(sources: list, persist):
 
     ``persist`` is called after every change so the registry is saved to the
     session draft immediately and survives quit/Continue. Enter or 'd' proceeds
-    to the next interview question; 'b' goes back; 'q' quits.
+    to the next interview question; ':b' goes back; ':q' quits.
     """
     print("\nSource registry")
     print("  Register every source the LLM must digest. These survive quit/Continue.")
@@ -1826,10 +1819,10 @@ def manage_source_registry(sources: list, persist):
 
 
 def pick_source_index(sources: list, action: str) -> int | None:
-    """Ask the user to pick a source by number for edit/remove; Enter or b cancels."""
+    """Ask the user to pick a source by number for edit/remove; Enter or :b cancels."""
     while True:
-        answer = read_line(f"  pick a source to {action} 1-{len(sources)} (Enter=cancel, b=back, q=quit): ").strip().lower()
-        if answer in {"", "b", "back"}:
+        answer = read_line(f"  pick a source to {action} 1-{len(sources)} (Enter=cancel, :b=back, :q=quit): ").strip().lower()
+        if answer in {"", ":b", ":back"}:
             return None
         if answer.isdigit():
             number = int(answer)
@@ -1850,7 +1843,7 @@ def print_mode_menu() -> None:
     """Show the run header with the available commands."""
     print("\nThis run builds a skill-package build-prompt.")
     print("  Press Enter (or 1) to start.")
-    print("  commands: r = reprint last prompt | s = settings | q = quit")
+    print("  commands: r = reprint last prompt | s = settings | :q = quit")
 
 
 def ask_mode(
@@ -1861,11 +1854,11 @@ def ask_mode(
     devlog: list[str],
     reprint_source: RunEntry | None,
 ) -> str:
-    """Ask for the run mode or handle the r/s commands (q quits via read_line)."""
+    """Ask for the run mode or handle r/s commands (:q quits via read_line)."""
     print_mode_menu()
     while True:
         answer = read_line(f"  start [{settings['mode']}]: ").strip().lower()
-        if answer in {"b", "back"}:
+        if answer in {":b", ":back"}:
             print("  Already at the start; nothing to go back to.")
             continue
         if answer in {"s", "settings"}:
@@ -1892,15 +1885,17 @@ def ask_mode(
 
 
 def pick_session(sessions: list[SessionEntry], allow_back: bool = False):
-    """List saved sessions newest-first and let the user pick one; BACK on b when allow_back."""
+    """List saved sessions newest-first and let the user pick one; BACK on :b when allowed."""
+    if not sessions:
+        return BACK
     ordered = list(reversed(sessions))
     print("\nSaved sessions (newest first):")
     for number, session in enumerate(ordered, start=1):
         print(f"  {number}. {session.name} [{session.root}] (created {session.created})")
-    suffix = " | b=back" if allow_back else ""
+    suffix = " | :b=back" if allow_back else ""
     while True:
-        answer = read_line(f"  pick a session 1-{len(ordered)} [1]{suffix} (q=quit): ").strip().lower()
-        if allow_back and answer in {"b", "back"}:
+        answer = read_line(f"  pick a session 1-{len(ordered)} [1]{suffix} (:q=quit): ").strip().lower()
+        if allow_back and answer in {":b", ":back"}:
             return BACK
         if answer == "":
             return ordered[0]
@@ -1961,18 +1956,18 @@ def choose_session(
 
 # ---- Interview engine -------------------------------------------------------
 def print_interview_warning() -> None:
-    """Warn about multi-line pastes and remind the user of m/b/q."""
+    """Warn about multi-line pastes and remind the user of :m/:b/:q."""
     print(
-        "\nAnswering tips: type m for a multi-line answer (paste, then a line with only END). "
-        "Type b to go back to the previous question, q to quit."
+        "\nAnswering tips: type :m for a multi-line answer (paste, then a line with only END). "
+        "Type :b to go back to the previous question, :q to quit."
     )
     print(
-        "Note: pasting several lines directly will spill into the next questions - use m for that."
+        "Note: pasting several lines directly will spill into the next questions - use :m for that."
     )
 
 
 def ask_interview_step(key: str, answers: dict[str, str], sources: list, session_last: RunEntry | None, persist):
-    """Ask one interview step by key; returns the value, the source list, or BACK."""
+    """Ask one step, forwarding ``persist`` for sources and deriving the observation default by category."""
     if key == "skill_slug":
         default = answers.get("skill_slug") or (
             session_last.skill_slug if session_last and session_last.skill_slug else DEFAULT_SKILL_SLUG
@@ -2088,7 +2083,7 @@ def run_interview(
     session_last: RunEntry | None, sources: list, persist, answers: dict[str, str] | None = None,
     start_index: int = 0,
 ) -> dict[str, str]:
-    """Run the navigable interview (b goes back) and return the scalar answers.
+    """Run the navigable interview (:b goes back) and return the scalar answers.
 
     The source registry is edited in place in ``sources``. ``persist(answers)``
     is called after every answer so the session's draft is always current and a
@@ -2119,7 +2114,7 @@ def run_interview(
 def entry_from_answers(
     answers: dict[str, str], sources: list, mode: str, timestamp: str, session: str
 ) -> RunEntry:
-    """Build a RunEntry from an answers dict plus the source registry."""
+    """Build an entry, passing mode/session directly and defaulting the other scalar fields."""
     scalar = {
         attr: answers.get(attr, RUN_DEFAULTS.get(attr, ""))
         for _key, attr in SCALAR_FIELDS.items()
@@ -2154,34 +2149,17 @@ def draft_from_answers(
             return getattr(fallback, attr)
         return defaults[attr]
 
+    scalar = {
+        attr: pick(attr)
+        for _key, attr in SCALAR_FIELDS.items()
+        if attr not in {"mode", "session"}
+    }
     return RunEntry(
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
         mode=mode,
         session=session,
-        target_agents=pick("target_agents"),
-        skill_name=pick("skill_name"),
-        skill_slug=pick("skill_slug"),
-        skill_purpose=pick("skill_purpose"),
-        skill_category=pick("skill_category"),
-        trigger_conditions=pick("trigger_conditions"),
-        example_tasks=pick("example_tasks"),
-        negative_triggers=pick("negative_triggers"),
-        user_workflow=pick("user_workflow"),
-        files_to_generate=pick("files_to_generate"),
-        doc_depth=pick("doc_depth"),
-        verification_requirements=pick("verification_requirements"),
-        known_gotchas=pick("known_gotchas"),
-        quality_rubric=pick("quality_rubric"),
-        observation_method=pick("observation_method"),
-        privacy_constraints=pick("privacy_constraints"),
-        out_of_scope=pick("out_of_scope"),
-        risk_level=pick("risk_level"),
-        source_license=pick("source_license"),
-        build_intent=pick("build_intent"),
-        parallelism=pick("parallelism"),
-        memory_file_policy=pick("memory_file_policy"),
-        subagent_review_policy=pick("subagent_review_policy"),
         sources=list(sources) if sources else (list(fallback.sources) if fallback else []),
+        **scalar,
     )
 
 
@@ -2191,13 +2169,13 @@ def read_pasted_block(expect_json: bool = False) -> str:
 
     When expect_json is True, the block finishes the instant the captured text
     parses as JSON (so pasting and pressing Enter completes with no terminator);
-    a blank line also finishes. A line equal to END or <<END>>, or EOF, always
-    finishes. Caps total size; reads literal text, so q is not treated as quit.
+    an initial blank line also finishes. Internal blank lines are preserved. A line equal to END or
+    <<END>>, or EOF, always finishes. Caps total size; reads literal text, so q is not treated as quit.
     """
     if expect_json:
         print(
             "Paste the LLM reply; it finishes automatically once the JSON is complete "
-            "(or press Enter on a blank line, or type END)."
+            "(or type END)."
         )
     else:
         print(f"Paste the LLM reply, then a line containing only {MULTILINE_SENTINEL} to finish:")
@@ -2211,14 +2189,14 @@ def read_pasted_block(expect_json: bool = False) -> str:
         stripped = line.strip()
         if stripped.upper() == MULTILINE_SENTINEL or stripped == PASTE_SENTINEL:
             break
-        if expect_json and stripped == "":
+        if expect_json and stripped == "" and not collected:
             break
         size += len(line) + 1
         if size > PASTE_CAP:
             print("Reply too large; using what was captured so far.")
             break
         collected.append(line)
-        if expect_json and parse_assist_response("\n".join(collected)) is not None:
+        if expect_json and stripped.endswith("}") and captured_json_is_complete("\n".join(collected)):
             break
     return "\n".join(collected)
 
@@ -2241,6 +2219,17 @@ def extract_json_text(block: str) -> str | None:
             if depth == 0:
                 return block[start : index + 1]
     return block[start:]  # unbalanced; let the repair layer try
+
+
+def captured_json_is_complete(block: str) -> bool:
+    """Return True only when the captured object is complete strict JSON, before repair is attempted."""
+    raw = extract_json_text(block)
+    if raw is None:
+        return False
+    try:
+        return isinstance(json.loads(raw), dict)
+    except json.JSONDecodeError:
+        return False
 
 
 def preclean_json(text: str) -> str:
@@ -2284,6 +2273,7 @@ def parse_assist_response(block: str) -> dict | None:
 def normalize_field_key(key: str) -> str | None:
     """Map a suggested key to a known field by exact or close fuzzy match."""
     candidate = key.strip().lower().replace(" ", "_")
+    candidate = {"intent": "build_intent"}.get(candidate, candidate)
     if candidate in KNOWN_FIELDS:
         return candidate
     match = difflib.get_close_matches(candidate, KNOWN_FIELDS, n=1, cutoff=0.8)
@@ -2372,10 +2362,9 @@ def apply_assist_response(
 ) -> dict[str, str]:
     """Ingest a sharpen/critique reply and AUTO-APPLY its field suggestions (no per-field prompts).
 
-    Decisions and recommended capabilities are printed for awareness; recognized field suggestions
-    are applied directly to ``answers`` (risk_level/target_agents validated against their allowed
-    values, invalid ones skipped), then a one-line summary lists what changed. The final review
-    screen still shows every value before generation, so the user keeps a last look.
+    Decisions and recommended capabilities are printed for awareness; recognized free-text field
+    suggestions are applied directly to ``answers`` while enum-constrained values are validated and
+    invalid ones skipped. The final review screen still shows every value before generation.
     """
     if not block.strip():
         print("No reply captured.")
@@ -2414,6 +2403,9 @@ def apply_assist_response(
         if attr == "source_license" and suggested not in SOURCE_LICENSES:
             skipped.append(attr)
             continue
+        if attr == "build_intent" and suggested not in BUILD_INTENTS:
+            skipped.append(attr)
+            continue
         if attr == "parallelism" and suggested not in PARALLELISM_MODES:
             skipped.append(attr)
             continue
@@ -2438,8 +2430,8 @@ def apply_assist_response(
 def record_assist_pass(devlog: list[str], session_root: str, kind: str, pass_no: int, block: str) -> None:
     """Append a one-line record of one assist pass reply to the development log.
 
-    The reply is stored as compact JSON (field values / critique notes only -
-    never the build-prompt) so each pass can be reviewed later.
+    Parsed replies are stored as compact JSON (never the build prompt); unparsed replies are stored
+    as a length-only ``reply-unparsed (N chars)`` marker.
     """
     parsed = parse_assist_response(block)
     if isinstance(parsed, dict):
@@ -2487,12 +2479,13 @@ def run_assist_loop(
     devlog: list[str],
     active: SessionEntry,
     persist,
-) -> dict[str, str]:
-    """Run the optional copy-paste LLM-assist loop, returning final answers.
+) -> dict[str, str] | object:
+    """Run the optional assist loop; return BACK for interview rewind or the final answers on skip.
 
     Both sharpen and critique passes return JSON field edits; after each, the
     user is offered another pass with a different LLM. Sources are not changed by
-    assist. Every pass is saved to the dev log and the session draft.
+    assist. Every pass is saved to the dev log and the session draft. After a pass,
+    declining another refinement returns to the assist menu.
     """
     print("\nLLM assist (optional): copy a request, paste it into any LLM, paste the reply back.")
     events.append("assist loop entered")
@@ -2500,7 +2493,7 @@ def run_assist_loop(
     while True:
         choice = prompt_menu(
             "assist",
-            "Get LLM help refining your answers, or skip to generate (b = back to the interview).",
+            "Get LLM help refining your answers, or skip to generate (:b = back to the interview).",
             (
                 ("sharpen", ("a",), "ask an LLM to sharpen your answers"),
                 ("critique", ("c",), "ask an LLM to critique the draft and return edits"),
@@ -2572,9 +2565,9 @@ def ask_run(
     assist_on = is_enabled(settings["assist_mode"])
     answers: dict[str, str] = {}
     stage = "interview"
-    # Back-chain: interview <-> assist <-> confirm. `b` at any stage steps back to the
+    # Back-chain: interview <-> assist <-> confirm. `:b` at any stage steps back to the
     # previous stage; re-entering the interview lands on the last question with prior
-    # answers prefilled, so `b` walks back to edit anything, then Enter moves forward.
+    # answers prefilled, so `:b` walks back to edit anything, then Enter moves forward.
     while True:
         if stage == "interview":
             start_index = 0 if not answers else len(INTERVIEW_STEPS) - 1
@@ -2654,7 +2647,7 @@ def show_review(run: RunEntry) -> None:
 
 # ---- Paths for the generated prompt -----------------------------------------
 def to_repo_relative_path(value: str) -> str:
-    """Convert an absolute or relative path setting into a repo-relative path."""
+    """Return a repo-relative path when possible, preserving cross-drive absolute paths."""
     raw = value.strip()
     if not raw:
         return "."
@@ -2663,7 +2656,10 @@ def to_repo_relative_path(value: str) -> str:
         try:
             relative = path.resolve().relative_to(REPO_ROOT)
         except ValueError:
-            relative = Path(os.path.relpath(path, REPO_ROOT))
+            try:
+                relative = Path(os.path.relpath(path, REPO_ROOT))
+            except ValueError:
+                return path.as_posix()
     else:
         relative = path
     return relative.as_posix()
@@ -3264,7 +3260,7 @@ INSPIRATION_ONLY_SUBSTRINGS = (
     "inspired by",
 )
 
-PLACEHOLDER_RE = re.compile(r"\(\s*\)|\{\s*\}|\[\s*\]")
+PLACEHOLDER_RE = re.compile(r"\(\s+\)|\{\s+\}|\[\s+\]")
 FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
 
 
@@ -3687,7 +3683,7 @@ def build_run_from_cli_args(
     session: SessionEntry,
     fallback: RunEntry | None,
 ) -> RunEntry:
-    """Build a RunEntry from CLI flags, defaults, and optional session state."""
+    """Build a run from CLI/session defaults, rejecting Claude parallelism only for Codex-exclusive runs."""
     values = cli_default_values(fallback)
     applied_name = False
     for arg_name, attr in CLI_RUN_FIELD_MAP.items():
@@ -3788,7 +3784,7 @@ def resolve_sources_for_cli(
     drafts: dict[str, RunEntry],
     history: list[RunEntry],
 ) -> list[SourceEntry]:
-    """Resolve source registry input for CLI commands."""
+    """Resolve explicit CLI sources, selected-session sources, or built-in seeds in that order."""
     if cli_sources_supplied(args):
         sources = []
         if getattr(args, "sources_file", None):
@@ -3817,12 +3813,12 @@ def load_sources_file(path_value: str) -> list[SourceEntry]:
         data = data["sources"]
     if not isinstance(data, list):
         raise CliError("sources file must contain a JSON array or an object with a 'sources' array")
-    return [SourceEntry.from_dict(item) if isinstance(item, dict) else bad_source_item(item) for item in data]
-
-
-def bad_source_item(item: object) -> SourceEntry:
-    """Raise a clean error for a non-object source item."""
-    raise CliError(f"source entries must be JSON objects, got {type(item).__name__}")
+    sources = []
+    for index, item in enumerate(data, start=1):
+        if not isinstance(item, dict):
+            raise CliError(f"source entry #{index} must be a JSON object, got {type(item).__name__}")
+        sources.append(SourceEntry.from_dict(item))
+    return sources
 
 
 def parse_source_spec(spec: str) -> SourceEntry:
@@ -3900,7 +3896,6 @@ def source_schema_text() -> str:
                 ("trust", "official"),
                 ("intended_use", "skill format and authoring rules"),
                 ("content_path", ""),
-                ("supply_at_draft", True),
                 ("approx_pages", 0),
             )
         )
@@ -3968,7 +3963,7 @@ def _copy_to_clipboard_posix(text: str) -> tuple[bool, str]:
 
 
 def copy_to_clipboard(text: str) -> tuple[bool, str]:
-    """Copy text to the OS clipboard (Windows ctypes; pbcopy/wl-copy/xclip/xsel elsewhere)."""
+    """Copy text cross-platform; Windows transfers HGLOBAL ownership after SetClipboardData succeeds."""
     if os.name != "nt":
         return _copy_to_clipboard_posix(text)
 
@@ -4108,7 +4103,7 @@ def offer_optional_dependencies(settings: OrderedDict[str, str]) -> None:
 
 
 def console_will_close_on_exit() -> bool:
-    """Detect a one-click launch whose console window dies with this process."""
+    """Treat at most two console processes as one-click ownership; fail safe to pause on probe errors."""
     if os.name != "nt":
         return False
     try:

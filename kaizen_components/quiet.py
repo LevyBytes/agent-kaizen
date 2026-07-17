@@ -19,11 +19,18 @@ from collections.abc import Iterator
 def quiet_stderr(*logger_names: str) -> Iterator[None]:
     """Silence the named loggers (to ERROR) and capture stray stderr + Python warnings for the block.
 
-    Exceptions raised inside (e.g. ``KaizenDenied``) still propagate -- stderr is restored on exit, so
-    the caller's structured error envelope prints cleanly.
+    Logger levels and stderr redirection are block-scoped and restored on exit; captured stderr is
+    intentionally discarded. Exceptions raised inside (e.g. ``KaizenDenied``) still propagate, so the
+    caller's structured error envelope prints cleanly after restoration.
     """
-    for name in logger_names:
-        logging.getLogger(name).setLevel(logging.ERROR)
-    with contextlib.redirect_stderr(io.StringIO()), warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        yield
+    loggers = [logging.getLogger(name) for name in logger_names]
+    prior_levels = [logger.level for logger in loggers]
+    try:
+        for logger in loggers:
+            logger.setLevel(logging.ERROR)
+        with contextlib.redirect_stderr(io.StringIO()), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        for logger, level in zip(loggers, prior_levels):
+            logger.setLevel(level)

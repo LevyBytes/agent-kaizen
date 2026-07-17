@@ -15,6 +15,7 @@ run from the workflow alone, with no network call (testing without a GPU/server)
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import time
 import urllib.error
@@ -28,27 +29,68 @@ from .backends.http_retry import http_request
 from .db import fetch_all, fetch_one, get_setting, new_id, now, write_tx
 from .denials import KaizenDenied
 from .hashing import file_sha256, utc_text_hash, validate_text_fields
-from .paths import GENERATED_ROOT, REPO_ROOT, repo_relative
+from .paths import GENERATED_ROOT, REPO_ROOT, repo_relative, resolve_user_path
 from .redaction import assert_redacted
 from .schemas import validate_record
 from .task_records import _text_arg
 
 
 _DEFAULT_URL = "http://127.0.0.1:8188"
+_PROBE_TIMEOUT = 5.0
+_POLL_TIMEOUT = 15.0
+_SUBMIT_TIMEOUT = 30.0
+_FETCH_TIMEOUT = 120.0
 
 
 def _slug(name: str) -> str:
+    """Return a lowercase filesystem-safe label with a default fallback."""
     return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name.strip().lower()) or "default"
 
 
 def _endpoint(args: Any) -> str:
+    """Resolve endpoint precedence from argument, environment, then loopback default."""
     raw = getattr(args, "endpoint", None) or os.environ.get("KAIZEN_COMFYUI_URL") or _DEFAULT_URL
-    return raw.rstrip("/")
+    url = raw.rstrip("/")
+    _require_loopback(url)
+    return url
 
 
 def _is_loopback(url: str) -> bool:
+    """Return whether the parsed hostname is a recognized loopback name or address."""
     host = (urllib.parse.urlparse(url).hostname or "").lower()
-    return host in ("127.0.0.1", "localhost", "::1")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _require_loopback(url: str) -> None:
+    """Deny non-HTTP or non-loopback ComfyUI endpoints before any network access."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "http" or not _is_loopback(url):
+        raise KaizenDenied(
+            "DENIED_COMFYUI_ENDPOINT_NON_LOOPBACK",
+            {
+                "endpoint": url,
+                "required_action": "use an http://localhost, http://127.0.0.0/8, or http://[::1] ComfyUI endpoint",
+            },
+            exit_code=2,
+        )
+
+
+def _timeout_arg(args: Any, name: str, default: float) -> float:
+    """Return a positive timeout argument without treating explicit zero as absent."""
+    raw = getattr(args, name, None)
+    value = default if raw is None else float(raw)
+    if value <= 0:
+        raise KaizenDenied(
+            "DENIED_TIMEOUT_INVALID",
+            {"argument": name.replace("_", "-"), "value": value, "required_action": "pass a positive timeout in seconds"},
+            exit_code=2,
+        )
+    return value
 
 
 def _backend_unreachable(url: str, error: Exception) -> KaizenDenied:
@@ -65,27 +107,39 @@ def _backend_unreachable(url: str, error: Exception) -> KaizenDenied:
 
 
 def _http_json(url: str, *, data: bytes | None = None, timeout: float = 30.0) -> Any:
+    """Returns parsed JSON (dict/list/scalar) or `{}` on empty body; raises via `http_request` on transient-exhausted/non-transient network error; POSTs when `data` is given."""
+    _require_loopback(url)
     headers = {"Content-Type": "application/json"} if data is not None else {}
     req = urllib.request.Request(url, data=data, headers=headers)
-    raw = http_request(req, timeout=timeout)
+    raw = http_request(req, timeout=timeout, redirect_validator=_require_loopback)
     return json.loads(raw.decode("utf-8")) if raw else {}
 
 
 def _http_bytes(url: str, *, timeout: float = 120.0) -> bytes:
-    return http_request(urllib.request.Request(url), timeout=timeout)
+    """Returns raw response bytes (used for `/view` binary outputs); no JSON parsing; propagates network errors."""
+    _require_loopback(url)
+    return http_request(
+        urllib.request.Request(url), timeout=timeout, redirect_validator=_require_loopback,
+    )
 
 
 def probe(url: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    """Hit `/system_stats`; preserve structured validation denials, map transport failures to DENIED_BACKEND_UNAVAILABLE, and return `{}` for a non-dict response."""
     try:
         stats = _http_json(f"{url}/system_stats", timeout=timeout)
+    except KaizenDenied:
+        raise
     except Exception as error:  # noqa: BLE001 -- any failure means "unreachable"
         raise _backend_unreachable(url, error) from error
     return stats if isinstance(stats, dict) else {}
 
 
 def fetch_object_info(url: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    """Hit `/object_info` with probe's validation/transport denial split for workflow validation."""
     try:
         info = _http_json(f"{url}/object_info", timeout=timeout)
+    except KaizenDenied:
+        raise
     except Exception as error:  # noqa: BLE001 -- any failure means "unreachable"
         raise _backend_unreachable(url, error) from error
     return info if isinstance(info, dict) else {}
@@ -142,7 +196,7 @@ def validate_workflow(url: str, workflow: dict[str, Any]) -> dict[str, Any]:
 def comfy_doctor(args: Any) -> dict[str, Any]:
     """Y5: probe the configured ComfyUI endpoint; the capability gate."""
     url = _endpoint(args)
-    stats = probe(url, timeout=float(getattr(args, "timeout", None) or 5))
+    stats = probe(url, timeout=_timeout_arg(args, "probe_timeout", _PROBE_TIMEOUT))
     system = stats.get("system", {}) if isinstance(stats, dict) else {}
     return {
         "status": "OK",
@@ -163,9 +217,7 @@ def _load_workflow(args: Any) -> dict[str, Any]:
             {"required_action": "pass --path (ComfyUI prompt JSON) or --payload-json-file"},
             exit_code=2,
         )
-    path = Path(src)
-    if not path.is_file():
-        raise KaizenDenied("DENIED_FILE_NOT_FOUND", {"path": str(path)}, exit_code=1)
+    path = resolve_user_path(str(src), require_file=True, repo_only=True)
     try:
         workflow = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as error:
@@ -195,7 +247,12 @@ def _extract_run_meta(workflow: dict[str, Any]) -> tuple[str | None, list[str]]:
             continue
         for seed_key in ("seed", "noise_seed"):
             value = inputs.get(seed_key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                or isinstance(value, float)
+                and value.is_integer()
+            ):
                 seeds.append(str(int(value)))
         for model_key in ("ckpt_name", "model_name", "unet_name", "vae_name", "lora_name"):
             value = inputs.get(model_key)
@@ -205,9 +262,12 @@ def _extract_run_meta(workflow: dict[str, Any]) -> tuple[str | None, list[str]]:
 
 
 def submit(url: str, workflow: dict[str, Any], client_id: str, *, timeout: float = 30.0) -> str:
+    """POST the prompt graph and return its id; map rejection separately from unreachability."""
     body = json.dumps({"prompt": workflow, "client_id": client_id}).encode("utf-8")
     try:
         resp = _http_json(f"{url}/prompt", data=body, timeout=timeout)
+    except KaizenDenied:
+        raise
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace") if error.fp else ""
         raise KaizenDenied(
@@ -228,10 +288,13 @@ def submit(url: str, workflow: dict[str, Any], client_id: str, *, timeout: float
 
 
 def wait(url: str, prompt_id: str, *, timeout: float = 300.0) -> dict[str, Any]:
+    """Polls `/history/{prompt_id}` every ~1s until an entry appears or `timeout`; raises DENIED_RUN_TIMEOUT on deadline; per-poll HTTP timeout is 15s (independent of the outer deadline)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            history = _http_json(f"{url}/history/{prompt_id}", timeout=15)
+            history = _http_json(f"{url}/history/{prompt_id}", timeout=_POLL_TIMEOUT)
+        except KaizenDenied:
+            raise
         except Exception as error:  # noqa: BLE001
             raise _backend_unreachable(url, error) from error
         entry = history.get(prompt_id) if isinstance(history, dict) else None
@@ -252,6 +315,7 @@ def fetch_outputs(url: str, entry: dict[str, Any], dest_dir: Path, *, timeout: f
     "3d", ...); anything shaped ``{filename, subfolder?, type?}`` is fetchable via ``/view``,
     so collect by shape, not by key name."""
     saved: list[Path] = []
+    used_names: set[str] = set()
     outputs = entry.get("outputs", {}) if isinstance(entry, dict) else {}
     for node_output in outputs.values():
         if not isinstance(node_output, dict):
@@ -267,15 +331,21 @@ def fetch_outputs(url: str, entry: dict[str, Any], dest_dir: Path, *, timeout: f
                     {"filename": filename, "subfolder": ref.get("subfolder", ""), "type": ref.get("type", "output")}
                 )
                 data = _http_bytes(f"{url}/view?{query}", timeout=timeout)
-                target = dest_dir / Path(filename).name
-                if target in saved:  # same basename under two output keys -> disambiguate by key
-                    target = dest_dir / f"{output_key}-{Path(filename).name}"
+                basename = Path(filename).name
+                candidate = basename
+                suffix = 1
+                while candidate.casefold() in used_names:
+                    candidate = f"{output_key}-{suffix}-{basename}"
+                    suffix += 1
+                used_names.add(candidate.casefold())
+                target = dest_dir / candidate
                 target.write_bytes(data)
                 saved.append(target)
     return saved
 
 
 def _insert_artifact(conn: Any, *, artifact_id: str, created: str, task_id: str | None, kind: str, path: Path, summary: str, is_test: int = 0) -> None:
+    """Inserts one `artifacts` row; hashes the file if present (sha256+bytes), else nulls; stores repo-relative path; empty body. Idempotency/caller-transaction expectation (must run inside `write_tx`)."""
     sha = file_sha256(path) if path.is_file() else None
     size = path.stat().st_size if path.is_file() else None
     rel = repo_relative(path)
@@ -320,18 +390,18 @@ def run_workflow(args: Any) -> dict[str, Any]:
     runtime_profile: str | None = None
 
     if not dry_run:
-        stats = probe(url, timeout=float(getattr(args, "timeout", None) or 5))  # capability gate
+        stats = probe(url, timeout=_timeout_arg(args, "probe_timeout", _PROBE_TIMEOUT))
         system = stats.get("system", {}) if isinstance(stats, dict) else {}
         runtime_profile = f"comfyui={system.get('comfyui_version')};python={system.get('python_version')}"
         if validate:
             validate_workflow(url, workflow)
         started = time.monotonic()
-        prompt_id = submit(url, workflow, uuid.uuid4().hex, timeout=30)
-        entry = wait(url, prompt_id, timeout=float(getattr(args, "timeout", None) or 300))
-        output_paths = fetch_outputs(url, entry, dest_dir, timeout=120)
+        prompt_id = submit(url, workflow, uuid.uuid4().hex, timeout=_SUBMIT_TIMEOUT)
+        entry = wait(url, prompt_id, timeout=_timeout_arg(args, "timeout", 300.0))
+        output_paths = fetch_outputs(url, entry, dest_dir, timeout=_FETCH_TIMEOUT)
         latency_ms = int((time.monotonic() - started) * 1000)
         run_status = (entry.get("status") or {}).get("status_str") if isinstance(entry.get("status"), dict) else None
-        status = "failed" if run_status == "error" else "completed"
+        status = "failed" if run_status == "error" else ("completed" if output_paths else "completed_no_output")
 
     route = getattr(args, "route", None) or "api"
     return _record_run(
@@ -511,6 +581,7 @@ def comfy_replay(args: Any) -> dict[str, Any]:
         raise KaizenDenied("DENIED_RECORD_NOT_FOUND", {"id": row[0], "table": "artifacts", "required_action": "the stored workflow artifact is missing"}, exit_code=1)
     workflow_path = REPO_ROOT / artifact[0]
     args.path = str(workflow_path)
+    args.payload_json_file = None
     if not getattr(args, "template", None):
         args.template = row[1]
     result = run_workflow(args)
@@ -572,6 +643,7 @@ def comfy_generate(args: Any) -> dict[str, Any]:
     resolved_path = dest_dir / f"y8-{new_id('wf')}.json"
     resolved_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     args.path = str(resolved_path)
+    args.payload_json_file = None
 
     route = getattr(args, "route", None) or "api"
     if route == "api":

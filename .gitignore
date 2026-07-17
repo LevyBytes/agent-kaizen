@@ -1,12 +1,13 @@
 # Local VS Code workspace/bootstrap artifacts
 _workspace/
 open-*-vscode.cmd
+open-*-vscode.sh
 
 # Node tooling (Prettier) and npm/yarn/pnpm. Kept LOCAL/private (not shipped) so this private
 # dev config does not add non-essential files to the public AGPL repo.
 node_modules/
-package.json
-package-lock.json
+/package.json
+/package-lock.json
 .prettierignore
 .prettierrc*
 .prettiercache
@@ -40,8 +41,8 @@ vendor/
 !.agents/skills/INDEX.md
 .codex/
 
-# Local source/bootstrap stub not intended for public repo
-src/
+# Local source/bootstrap stub not intended for public repo (root-anchored: extension/src ships)
+/src/
 
 # Python cache/build artifacts
 __pycache__/

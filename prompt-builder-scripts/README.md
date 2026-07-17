@@ -9,10 +9,10 @@ The scripts do not call AI APIs and do not generate images or code by themselves
 From the repo root:
 
 ```powershell
-python .\prompt-builder-scripts\<category>\<script-name>.py
+python ./prompt-builder-scripts/<category>/<script-name>.py
 ```
 
-Scripts that live at the folder root (no category) are invoked without one, for example `python .\prompt-builder-scripts\generate-prompt-for-new-script.py`.
+Scripts that live at the folder root (no category) are invoked without one, for example `python ./prompt-builder-scripts/generate-prompt-for-new-script.py`.
 
 Press Enter to accept the default shown for a question. Most runs should take less than a minute once the settings are established.
 

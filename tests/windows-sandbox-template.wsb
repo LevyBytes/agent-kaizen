@@ -1,0 +1,35 @@
+<Configuration>
+  <!-- ============================================================================
+       Agent Kaizen - generic Windows Sandbox test template.
+
+       Windows Sandbox is an EDGE-CASE test harness for the Windows installer/repo.
+       The ONE thing that makes the installer work in a fresh sandbox is DISABLING
+       Smart App Control in the LogonCommand below (recent Windows 11 base images
+       ship SAC in Enforce mode, which blocks the per-user Python MSI child process
+       and unsigned native modules). Everything else here is generic.
+
+       As-is: launch this .wsb. It disables SAC, downloads the published installer
+       to the Desktop, and opens a terminal. Run:  Install-Agent-Kaizen.cmd
+
+       To test LOCAL changes instead of the published installer: create a small host
+       folder that holds your edited Install-Agent-Kaizen.cmd, then uncomment the
+       MappedFolder below and point HostFolder at it (the host folder MUST already
+       exist or the sandbox refuses to start). Keep the mapping MINIMAL - never map
+       a whole git repo (junctions + size destabilize the sandbox).
+       ============================================================================ -->
+  <Networking>Enable</Networking>
+
+  <!--
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\path\to\your\staging-folder</HostFolder>
+      <SandboxFolder>C:\ak</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  -->
+
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Continue'; reg.exe add 'HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy' /v VerifiedAndReputablePolicyState /t REG_DWORD /d 0 /f | Out-Null; $ci=Join-Path $env:windir 'System32\CiTool.exe'; if(Test-Path -LiteralPath $ci){ Start-Process -FilePath $ci -ArgumentList '-r' -Wait -WindowStyle Hidden }; try { Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue } catch {}; New-Item -ItemType Directory -Force -Path 'C:\dev' | Out-Null; $dest=Join-Path $env:USERPROFILE 'Desktop\Install-Agent-Kaizen.cmd'; try { Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/LevyBytes/agent-kaizen/main/setup/Install-Agent-Kaizen.cmd' -OutFile $dest } catch {}; Start-Process -FilePath 'cmd.exe' -ArgumentList '/k cd /d %USERPROFILE%\Desktop&amp;&amp; echo Smart App Control disabled. If it still shows enabled, close and relaunch this .wsb once.&amp;&amp; echo Then run:  Install-Agent-Kaizen.cmd'"</Command>
+  </LogonCommand>
+</Configuration>

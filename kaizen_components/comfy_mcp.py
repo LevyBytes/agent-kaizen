@@ -23,11 +23,13 @@ from typing import Any
 
 from . import comfyui
 from .comfyui import _endpoint, _insert_artifact, probe
-from .db import get_setting, new_id, now, set_setting, write_tx
+from .db import get_setting, new_id, now, write_tx
 from .denials import KaizenDenied
-from .hashing import utc_text_hash
+from .hashing import utc_text_hash, validate_text_fields
 from .paths import GENERATED_ROOT, repo_relative
+from .redaction import assert_redacted
 from .schemas import validate_record
+from .orchestration.vendor_env_scrub import scrub_environment
 
 
 def _import_mcp():
@@ -42,6 +44,20 @@ def _import_mcp():
             exit_code=2,
         ) from error
     return ClientSession, StdioServerParameters, stdio_client
+
+
+def _mcp_environment(spec: dict[str, Any], endpoint: str) -> dict[str, str]:
+    """Build the third-party MCP environment without inherited credential, secret, or telemetry-token keys."""
+    def blocked(name: str) -> bool:
+        upper = name.upper()
+        return upper.startswith("OTEL_") or "CREDENTIAL" in upper or upper.endswith((
+            "_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_SESSION_TOKEN", "_BEARER_TOKEN",
+            "_PASSWORD", "_SECRET", "_SECRET_KEY", "_TOKEN",
+        ))
+
+    env = {key: value for key, value in scrub_environment().items() if not blocked(key)}
+    env.update({key: value.replace("<endpoint>", endpoint) for key, value in (spec.get("env") or {}).items()})
+    return env
 
 
 # Candidate table. Only artokun has a reproducible local STDIO launch (npm package, Windows-supported).
@@ -139,7 +155,7 @@ def score_candidate(doctor: dict[str, Any], spec: dict[str, Any]) -> dict[str, A
 
 async def _probe_candidate(spec: dict[str, Any], endpoint: str, timeout: float = 60.0) -> dict[str, Any]:
     ClientSession, StdioServerParameters, stdio_client = _import_mcp()
-    env = {**os.environ, **{k: v.replace("<endpoint>", endpoint) for k, v in (spec.get("env") or {}).items()}}
+    env = _mcp_environment(spec, endpoint)
     params = StdioServerParameters(command=spec["command"], args=spec.get("args", []), env=env)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -195,6 +211,7 @@ def _doctor_candidate(slug: str, spec: dict[str, Any], endpoint: str, timeout: f
 
 
 def mcp_doctor(args: Any) -> dict[str, Any]:
+    """Probe a single named `--candidate` and return `{report, score}`; fails fast if mcp client absent or candidate unknown/missing."""
     slug = getattr(args, "candidate", None)
     if not slug:
         raise KaizenDenied("DENIED_CANDIDATE_REQUIRED", {"candidates": sorted(CANDIDATES), "required_action": "resubmit with --candidate"}, exit_code=2)
@@ -202,13 +219,19 @@ def mcp_doctor(args: Any) -> dict[str, Any]:
         raise KaizenDenied("DENIED_CANDIDATE_UNKNOWN", {"candidate": slug, "candidates": sorted(CANDIDATES), "required_action": "use a known --candidate"}, exit_code=2)
     _import_mcp()  # fail fast + clearly when the optional client is absent
     endpoint = _endpoint(args)
-    doctor = _doctor_candidate(slug, CANDIDATES[slug], endpoint, timeout=float(getattr(args, "timeout", None) or 60))
+    doctor = _doctor_candidate(
+        slug,
+        CANDIDATES[slug],
+        endpoint,
+        timeout=comfyui._timeout_arg(args, "probe_timeout", 60.0),
+    )
     scored = score_candidate(doctor, CANDIDATES[slug])
     return {"status": "OK", "action": "doctor", "endpoint": endpoint, "report": doctor, "score": scored}
 
 
 def _bakeoff_report_md(endpoint: str, rows: list[dict[str, Any]], winner: str | None) -> str:
-    lines = [f"# ComfyUI MCP Bakeoff", "", f"Endpoint: {endpoint}", f"Winner: {winner or 'none'}", ""]
+    """Render the per-candidate gate table as Markdown."""
+    lines = ["# ComfyUI MCP Bakeoff", "", f"Endpoint: {endpoint}", f"Winner: {winner or 'none'}", ""]
     for row in rows:
         d, s = row["doctor"], row["score"]
         lines.append(f"## {row['slug']} ({d['repo']}, {d['license']}) -- score {s['score']}, hard_pass {s['hard_pass']}")
@@ -220,12 +243,18 @@ def _bakeoff_report_md(endpoint: str, rows: list[dict[str, Any]], winner: str | 
 
 
 def mcp_bakeoff(args: Any) -> dict[str, Any]:
+    """Probe+score ALL candidates, write a markdown report artifact + one source_lock per candidate, and pin the highest-scoring hard-pass winner in `db_settings.active_comfy_mcp[_version]`."""
     _import_mcp()  # fail fast when the optional client is absent
     endpoint = _endpoint(args)
     is_test = 1 if getattr(args, "test", False) else 0
     rows: list[dict[str, Any]] = []
     for slug, spec in CANDIDATES.items():
-        doctor = _doctor_candidate(slug, spec, endpoint, timeout=float(getattr(args, "timeout", None) or 60))
+        doctor = _doctor_candidate(
+            slug,
+            spec,
+            endpoint,
+            timeout=comfyui._timeout_arg(args, "probe_timeout", 60.0),
+        )
         rows.append({"slug": slug, "doctor": doctor, "score": score_candidate(doctor, spec)})
     passing = [r for r in rows if r["score"]["hard_pass"]]
     winner = max(passing, key=lambda r: r["score"]["score"])["slug"] if passing else None
@@ -266,12 +295,18 @@ def mcp_bakeoff(args: Any) -> dict[str, Any]:
                 (rec_id, created, payload["source_id"], payload["authority_tier"], payload["url_or_repository"],
                  payload["version_or_commit"], created, content_hash, payload["license"], None, payload["summary"], "", is_test),
             )
+        if winner:
+            conn.execute(
+                "INSERT OR REPLACE INTO db_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                ("active_comfy_mcp", winner, created),
+            )
+            if winner_version:
+                conn.execute(
+                    "INSERT OR REPLACE INTO db_settings (key, value, updated_at) VALUES (?, ?, ?)",
+                    ("active_comfy_mcp_version", winner_version, created),
+                )
 
     write_tx(op)
-    if winner:
-        set_setting("active_comfy_mcp", winner)
-        if winner_version:
-            set_setting("active_comfy_mcp_version", winner_version)
     return {
         "status": "OK",
         "action": "bakeoff",
@@ -287,7 +322,7 @@ def mcp_bakeoff(args: Any) -> dict[str, Any]:
 def _mcp_submit(spec: dict[str, Any], endpoint: str, adapter: dict[str, str], workflow: dict[str, Any], timeout: float) -> str:
     """Submit the workflow through the winner's MCP submit tool; return the ComfyUI prompt_id."""
     ClientSession, StdioServerParameters, stdio_client = _import_mcp()
-    env = {**os.environ, **{k: v.replace("<endpoint>", endpoint) for k, v in (spec.get("env") or {}).items()}}
+    env = _mcp_environment(spec, endpoint)
     params = StdioServerParameters(command=spec["command"], args=spec.get("args", []), env=env)
 
     async def _run() -> str:
@@ -335,7 +370,7 @@ def mcp_generate(args: Any, workflow: dict[str, Any]) -> dict[str, Any]:
             exit_code=2,
         )
     url = _endpoint(args)
-    stats = probe(url, timeout=float(getattr(args, "timeout", None) or 5))  # capability gate
+    stats = probe(url, timeout=comfyui._timeout_arg(args, "probe_timeout", comfyui._PROBE_TIMEOUT))
     system = stats.get("system", {}) if isinstance(stats, dict) else {}
     runtime_profile = f"comfyui={system.get('comfyui_version')};python={system.get('python_version')}"
 
@@ -343,6 +378,8 @@ def mcp_generate(args: Any, workflow: dict[str, Any]) -> dict[str, Any]:
     workflow_hash = utc_text_hash(workflow)
     seed, models = comfyui._extract_run_meta(workflow)
     summary = comfyui._text_arg(args, "summary", f"ComfyUI run ({template}).")
+    assert_redacted({"summary": summary, "template": template})
+    validate_text_fields({"summary": summary, "body": ""})
     run_id = new_id("gr")
     created = now()
     dest_dir = GENERATED_ROOT / template
@@ -352,12 +389,12 @@ def mcp_generate(args: Any, workflow: dict[str, Any]) -> dict[str, Any]:
     workflow_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     started = time.monotonic()
-    prompt_id = _mcp_submit(CANDIDATES[slug], url, adapter, workflow, timeout=float(getattr(args, "timeout", None) or 60))
-    entry = comfyui.wait(url, prompt_id, timeout=float(getattr(args, "timeout", None) or 300))
-    output_paths = comfyui.fetch_outputs(url, entry, dest_dir, timeout=120)
+    prompt_id = _mcp_submit(CANDIDATES[slug], url, adapter, workflow, timeout=60.0)
+    entry = comfyui.wait(url, prompt_id, timeout=comfyui._timeout_arg(args, "timeout", 300.0))
+    output_paths = comfyui.fetch_outputs(url, entry, dest_dir, timeout=comfyui._FETCH_TIMEOUT)
     latency_ms = int((time.monotonic() - started) * 1000)
     run_status = (entry.get("status") or {}).get("status_str") if isinstance(entry.get("status"), dict) else None
-    status = "failed" if run_status == "error" else "completed"
+    status = "failed" if run_status == "error" else ("completed" if output_paths else "completed_no_output")
 
     return comfyui._record_run(
         args=args, url=url, workflow_hash=workflow_hash, template=template, status=status,

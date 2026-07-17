@@ -1,8 +1,9 @@
+"""Provide Kaizen database connections, schema lifecycle, bounded retries, integrity checks, backups, and exports."""
+
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from . import TOOL_VERSION
 from .db_retry import ATTEMPTS, is_retryable, retry_delay, with_retry
 from .db_schema import (
     ADDITIVE_COLUMNS,
+    ADDITIVE_INDEX_SQL,
     DDL,
     FTS_INDEX_SQL,
     INDEXES,
@@ -33,14 +35,17 @@ import turso  # noqa: E402  # environment is routed before the native module loa
 
 
 def now() -> str:
+    """UTC ISO-8601 timestamp string (trivial/optional)."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def new_id(prefix: str) -> str:
+    """Id format `<prefix>_<UTC YYYYMMDDHHMMSS>_<10 hex>`; durable-record primary keys."""
     return f"{prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:10]}"
 
 
 def connect():
+    """Returns a turso conn with `journal_mode=mvcc`; retries only retryable faults up to ATTEMPTS w/ backoff else DENIED_DB_CONNECT_RETRY_EXHAUSTED; caller owns close."""
     ensure_runtime_dirs()
     last_error: Exception | None = None
     attempts_made = 0
@@ -84,6 +89,12 @@ def _apply_additive_columns(conn) -> None:
             continue
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
+    # Additive indexes ride the same manifest-neutral path (see ADDITIVE_INDEX_SQL / FTS precedent).
+    for stmt in ADDITIVE_INDEX_SQL:
+        try:
+            conn.execute(stmt)
+        except Exception:  # noqa: BLE001 -- target table missing -> the CREATE DDL handles it first
+            pass
 
 
 def purge_test_records() -> dict[str, Any]:
@@ -138,7 +149,7 @@ def _migrate(conn) -> None:
     the embedding index is rebuildable from it (B3)."""
     inline_cols = {r[1] for r in conn.execute("PRAGMA table_info(evidence_chunks)").fetchall()}
     if "embedding" in inline_cols and "embedding_model" in inline_cols:
-        # Backfill exact vector32 blobs (raw bytes, no float round-trip); dim from vector_extract length.
+        # Copy vector32 blobs verbatim; vector_extract is used only to read each dimension.
         rows = conn.execute(
             "SELECT ec.id, ec.embedding_model, ec.embedding, vector_extract(ec.embedding), ec.created_at, "
             "COALESCE(ed.is_test, 0) FROM evidence_chunks ec "
@@ -155,14 +166,15 @@ def _migrate(conn) -> None:
                 "(chunk_id, embedding_model, dim, embedding, created_at, is_test) VALUES (?, ?, ?, ?, ?, ?)",
                 (cid, emodel, dim, blob, created or now(), int(is_test or 0)),
             )
-        _seed_active_model_if_absent(conn)
+    _seed_active_model_if_absent(conn)
+    if "embedding" in inline_cols:
         conn.execute("ALTER TABLE evidence_chunks DROP COLUMN embedding")
+    if "embedding_model" in inline_cols:
         conn.execute("ALTER TABLE evidence_chunks DROP COLUMN embedding_model")
-    else:
-        _seed_active_model_if_absent(conn)
 
 
 def initialize() -> dict[str, Any]:
+    """K1: idempotent create/additive-alter/index/FTS/migrate then stamp schema_version; relies on per-step idempotency (not one transaction); returns schema_status()."""
     ensure_runtime_dirs()
     conn = connect()
     applied_at = now()
@@ -207,6 +219,7 @@ def initialize() -> dict[str, Any]:
 
 
 def schema_status() -> dict[str, Any]:
+    """Read-only K2 status dict: version/migration/manifest flags + schema_ok/manifest_match gating; no writes."""
     exists = DB_PATH.exists()
     if not exists:
         return {
@@ -290,6 +303,7 @@ def set_setting(key: str, value: str) -> None:
 
 
 def ensure_schema() -> None:
+    """Write-gate: initializes on missing DB else raises DENIED_SCHEMA_STATUS / DENIED_SCHEMA_DRIFT; reads stay open."""
     if not DB_PATH.exists():
         initialize()
         return
@@ -363,22 +377,27 @@ def integrity_scan() -> dict[str, Any]:
     For each child (table, column) -> parent (table, column) in REFERENCES, count non-NULL
     child values with no matching parent row. NULL child references are valid (optional).
     """
+    ensure_schema()
     relationships: list[dict[str, Any]] = []
     total_orphans = 0
     for child_table, child_col, parent_table, parent_col in REFERENCES:
+        join = (
+            f"FROM {child_table} AS ct "
+            f"LEFT JOIN {parent_table} AS pt ON ct.{child_col} = pt.{parent_col} "
+            f"WHERE ct.{child_col} IS NOT NULL AND pt.{parent_col} IS NULL"
+        )
+        count = int(read_retry(
+            lambda conn, sql=f"SELECT COUNT(*) {join}": conn.execute(sql).fetchone()[0]
+        ))
         rows = read_retry(
-            lambda conn, ct=child_table, cc=child_col, pt=parent_table, pc=parent_col: list(
+            lambda conn, sql=f"SELECT ct.{child_col}, ct.rowid {join} ORDER BY ct.rowid LIMIT 5": list(
                 conn.execute(
                     # rowid, not a literal "id" column: child tables need not be id-keyed
                     # (e.g. generative_run_routes is keyed by run_id), and every rowid table works.
-                    f"SELECT ct.{cc}, ct.rowid FROM {ct} AS ct "
-                    f"LEFT JOIN {pt} AS pt ON ct.{cc} = pt.{pc} "
-                    f"WHERE ct.{cc} IS NOT NULL AND pt.{pc} IS NULL "
-                    f"ORDER BY ct.rowid LIMIT 6"
+                    sql
                 ).fetchall()
             )
         )
-        count = len(rows)
         total_orphans += count
         entry: dict[str, Any] = {
             "child": f"{child_table}.{child_col}",
@@ -386,8 +405,8 @@ def integrity_scan() -> dict[str, Any]:
             "orphans": count,
         }
         if rows:
-            entry["sample"] = [{"child_id": r[1], "missing_ref": r[0]} for r in rows[:5]]
-            if count > 5:
+            entry["sample"] = [{"child_id": r[1], "missing_ref": r[0]} for r in rows]
+            if count > len(rows):
                 entry["sample_truncated"] = True
         relationships.append(entry)
     # Child-leak invariant: a terminal-SUCCESS agent run that still has an open child. Not a
@@ -410,34 +429,90 @@ def integrity_scan() -> dict[str, Any]:
     }
 
 
-def write_tx(operation: Callable[[Any, int], Any]) -> Any:
+def write_tx(
+    operation: Callable[[Any, int], Any],
+    *,
+    session_fence: tuple[str, str | None, int | None] | None = None,
+) -> Any:
+    """Run ``operation(conn, attempt)`` inside the shipped connect/BEGIN CONCURRENT/COMMIT retry.
+
+    ``session_fence`` (v8 M10b, additive; default None ⇒ byte-identical for every existing caller) is
+    the node-aware epoch fence of plan §B.3. When given ``(session_id, expected_owning_node,
+    expected_node_epoch)``, the wrapped op FIRST reads ``owning_node, node_epoch`` from ``agent_sessions``
+    on THE WRITE CONN (no TOCTOU) and refuses ``DENIED_STALE_FENCE`` (exit 2) BEFORE the op runs when the
+    row is fenced (``owning_node IS NOT NULL``) and disagrees with the caller:
+    - ``owning_node != expected_owning_node`` ⇒ a foreign node owns this session (split-brain control);
+    - ``expected_node_epoch is not None`` AND ``node_epoch != expected_node_epoch`` ⇒ a stale epoch.
+      ``expected_node_epoch = None`` asserts ONLY the owning-node axis (the honest M10b v1 shape: the
+      caller cannot know a cross-node epoch without a TOCTOU read; real cross-node epoch bumps arrive at
+      M14 and will pass a concrete epoch).
+    A row with ``owning_node IS NULL`` (unfenced legacy/off-mode row) is NOT checked (back-compat); a
+    MISSING row is NOT checked here (the op's own not-found handling owns that)."""
     ensure_schema()
-    return with_retry(connect, operation)
+    if session_fence is None:
+        return with_retry(connect, operation)
+
+    session_id, expected_owning_node, expected_node_epoch = session_fence
+
+    def fenced(conn: Any, attempt: int) -> Any:
+        row = conn.execute(
+            "SELECT owning_node, node_epoch FROM agent_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        # Missing row => let the operation's own not-found path handle it. Unfenced (owning_node NULL)
+        # legacy/off-mode row => no fence (back-compat: pre-M10b sessions carry no owner).
+        if row is not None and row[0] is not None:
+            owning_node, node_epoch = row[0], row[1]
+            epoch_mismatch = expected_node_epoch is not None and node_epoch != expected_node_epoch
+            if owning_node != expected_owning_node or epoch_mismatch:
+                raise KaizenDenied(
+                    "DENIED_STALE_FENCE",
+                    {
+                        "session_id": session_id,
+                        "owning_node": owning_node,
+                        "node_epoch": node_epoch,
+                        "expected_owning_node": expected_owning_node,
+                        "expected_node_epoch": expected_node_epoch,
+                        "required_action": (
+                            "this session is owned by another node/epoch; attach + bump the epoch "
+                            "(cross-machine steer, M14) before mutating it -- a stale owner is split-brain control"
+                        ),
+                    },
+                    exit_code=2,
+                )
+        return operation(conn, attempt)
+
+    return with_retry(connect, fenced)
 
 
 def fetch_one(sql: str, params: tuple[Any, ...] = ()) -> tuple[Any, ...] | None:
+    """Ensure_schema + retry-wrapped single-row read; row tuple or None."""
     ensure_schema()
     return read_retry(lambda conn: conn.execute(sql, params).fetchone())
 
 
 def fetch_all(sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    """Ensure_schema + retry-wrapped read; list of row tuples."""
     ensure_schema()
     return read_retry(lambda conn: list(conn.execute(sql, params).fetchall()))
 
 
 def read_retry(operation: Callable[[Any], Any]) -> Any:
+    """Runs a read op on a fresh conn per attempt w/ backoff on retryable faults else DENIED_DB_READ_RETRY_EXHAUSTED (note F2 conn-held-across-sleep)."""
     last_error: Exception | None = None
     for attempt in range(1, ATTEMPTS + 1):
         conn = connect()
+        retry = False
         try:
             return operation(conn)
         except Exception as error:
             last_error = error
             if not is_retryable(error) or attempt == ATTEMPTS:
                 break
-            time.sleep(retry_delay(attempt - 1))
+            retry = True
         finally:
             conn.close()
+        if retry:
+            time.sleep(retry_delay(attempt - 1))
     raise KaizenDenied(
         "DENIED_DB_READ_RETRY_EXHAUSTED",
         {
@@ -450,27 +525,35 @@ def read_retry(operation: Callable[[Any], Any]) -> Any:
 
 
 def table_count(table: str) -> int:
+    """COUNT(*) for a table name interpolated into SQL — trusted identifiers only."""
     row = fetch_one(f"SELECT COUNT(*) FROM {table}")
     return int(row[0]) if row else 0
 
 
 def backup_db() -> dict[str, Any]:
+    """Create one crash-consistent ``VACUUM INTO`` snapshot plus a sha256 manifest."""
     ensure_schema()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = DB_ROOT / "backups" / stamp
     out_dir.mkdir(parents=True, exist_ok=True)
-    copied = []
-    for path in (DB_PATH, DB_PATH.with_name(DB_PATH.name + "-log"), DB_PATH.with_name(DB_PATH.name + "-wal")):
-        if path.exists():
-            target = out_dir / path.name
-            shutil.copy2(path, target)
-            copied.append(
-                {
-                    "path": repo_relative(target),
-                    "sha256": file_sha256(target),
-                    "bytes": target.stat().st_size,
-                }
-            )
+    target = out_dir / DB_PATH.name
+
+    def snapshot(conn: Any) -> None:
+        # VACUUM INTO reads one consistent source snapshot and emits a standalone DB; live sidecars
+        # are deliberately not copied because independently copying them can tear under a writer.
+        # SQLite/Turso require a string literal here rather than a bound parameter. The target is
+        # internally derived; SQL-literal quoting still doubles apostrophes for path correctness.
+        literal = str(target).replace("'", "''")
+        conn.execute(f"VACUUM INTO '{literal}'")
+
+    read_retry(snapshot)
+    copied = [
+        {
+            "path": repo_relative(target),
+            "sha256": file_sha256(target),
+            "bytes": target.stat().st_size,
+        }
+    ]
     manifest = {"created_at": now(), "db_path": str(DB_PATH), "files": copied}
     manifest_path = out_dir / "backup-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -478,6 +561,7 @@ def backup_db() -> dict[str, Any]:
 
 
 def export_manifest() -> dict[str, Any]:
+    """Writes a timestamped manifest of schema_status + per-table counts + file hashes to MANIFEST_ROOT."""
     ensure_schema()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     tables = schema_manifest()["tables"]

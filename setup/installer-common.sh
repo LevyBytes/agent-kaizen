@@ -32,6 +32,20 @@ AK_EX_UNAVAILABLE=69
 AK_EX_SOFTWARE=70
 AK_EX_TEMPFAIL=75
 
+# Safety selectors are arithmetic flags. Reject malformed environment values
+# before a failed numeric comparison can turn a deny gate into a no-op.
+for ak_flag_name in AK_PLAN_ONLY AK_NO_PROGRESS AK_NO_NETWORK AK_NO_EXTERNAL AK_NO_USER_ENV AK_ASSUME_YES AK_NO_INPUT AK_SELF_TEST; do
+  ak_flag_value="${!ak_flag_name}"
+  case "$ak_flag_value" in
+    0|1) ;;
+    *)
+      printf "ERROR: %s must be 0 or 1, got '%s'.\n" "$ak_flag_name" "$ak_flag_value" >&2
+      return "$AK_EX_USAGE" 2>/dev/null || exit "$AK_EX_USAGE"
+      ;;
+  esac
+done
+unset ak_flag_name ak_flag_value
+
 # ANSI status colors, only when stderr is a TTY and NO_COLOR is unset (cli-design color rules).
 AK_C_OK=""; AK_C_SKIP=""; AK_C_WARN=""; AK_C_ERR=""; AK_C_RESET=""
 ak_color_init() {
@@ -55,10 +69,12 @@ ak_step_skipped() {
 }
 
 ak_step_obj() {
+  # Format the public id|name step entry consumed by ak_init and plan/progress helpers.
   printf '%s|%s' "$1" "$2"
 }
 
 ak_resolve_devroot() {
+  # Resolve explicit input, DEVROOT, then repo parent; echo a raw candidate if canonicalization fails.
   local supplied="${1:-}"
   local repo_root="${2:?repo root required}"
   if [ -n "$supplied" ]; then
@@ -69,7 +85,7 @@ ak_resolve_devroot() {
     (cd "$DEVROOT" 2>/dev/null && pwd) || printf '%s\n' "$DEVROOT"
     return
   fi
-  (cd "$repo_root/.." && pwd)
+  (cd "$repo_root/.." 2>/dev/null && pwd) || printf '%s\n' "$repo_root/.."
 }
 
 ak_init() {
@@ -94,7 +110,28 @@ ak_init() {
 }
 
 ak_json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  # Escape one Bash string for a JSON string value, including every representable control character.
+  local value="$1" char code i
+  for ((i=0; i<${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      '"') printf '\\"' ;;
+      '\') printf '\\\\' ;;
+      $'\b') printf '\\b' ;;
+      $'\f') printf '\\f' ;;
+      $'\n') printf '\\n' ;;
+      $'\r') printf '\\r' ;;
+      $'\t') printf '\\t' ;;
+      *)
+        printf -v code '%d' "'$char"
+        if [ "$code" -lt 32 ]; then printf '\\u%04x' "$code"; else printf '%s' "$char"; fi
+        ;;
+    esac
+  done
+}
+
+ak_json_bool() {
+  [ "$1" -eq 1 ] && printf true || printf false
 }
 
 ak_show_plan() {
@@ -126,13 +163,13 @@ ak_write_plan_json() {
     printf '  "repoRoot": "%s",\n' "$(ak_json_escape "$AK_REPO_ROOT")"
     printf '  "devRoot": "%s",\n' "$(ak_json_escape "$AK_DEVROOT")"
     printf '  "logRoot": "%s",\n' "$(ak_json_escape "$AK_LOG_ROOT")"
-    printf '  "planOnly": %s,\n' "$([ "$AK_PLAN_ONLY" -eq 1 ] && printf true || printf false)"
-    printf '  "selfTest": %s,\n' "$([ "$AK_SELF_TEST" -eq 1 ] && printf true || printf false)"
+    printf '  "planOnly": %s,\n' "$(ak_json_bool "$AK_PLAN_ONLY")"
+    printf '  "selfTest": %s,\n' "$(ak_json_bool "$AK_SELF_TEST")"
     printf '  "safety": {"noNetwork": %s, "noExternalActions": %s, "noUserEnvWrites": %s, "noInput": %s},\n' \
-      "$([ "$AK_NO_NETWORK" -eq 1 ] && printf true || printf false)" \
-      "$([ "$AK_NO_EXTERNAL" -eq 1 ] && printf true || printf false)" \
-      "$([ "$AK_NO_USER_ENV" -eq 1 ] && printf true || printf false)" \
-      "$([ "$AK_NO_INPUT" -eq 1 ] && printf true || printf false)"
+      "$(ak_json_bool "$AK_NO_NETWORK")" \
+      "$(ak_json_bool "$AK_NO_EXTERNAL")" \
+      "$(ak_json_bool "$AK_NO_USER_ENV")" \
+      "$(ak_json_bool "$AK_NO_INPUT")"
     printf '  "steps": [\n'
     local i entry id name comma
     for ((i=0; i<${#AK_STEPS[@]}; i++)); do
@@ -187,6 +224,7 @@ ak_progress() {
 }
 
 ak_step_index() {
+  # Return the registered 1-based step index; unknown ids fail instead of reusing stale progress state.
   local needle="$1" i entry id
   for ((i=0; i<${#AK_STEPS[@]}; i++)); do
     entry="${AK_STEPS[$i]}"
@@ -196,7 +234,8 @@ ak_step_index() {
       return
     fi
   done
-  printf '%d\n' "$((${AK_CURRENT_STEP:-0} + 1))"
+  printf 'ERROR: unregistered setup step id: %s\n' "$needle" >&2
+  return "$AK_EX_SOFTWARE"
 }
 
 ak_run_step() {
@@ -270,6 +309,7 @@ ak_tail_log() {
 }
 
 ak_run() {
+  # Parse --note/--cwd/--, run one external command asynchronously with logging/spinner, and return its status.
   local note=""
   local cwd=""
   while [ $# -gt 0 ]; do
@@ -291,6 +331,11 @@ ak_run() {
     [ -z "$cwd" ] || printf 'WORKDIR: %s\n' "$cwd"
   } > "$log"
   if [ -n "$cwd" ]; then
+    if [ ! -d "$cwd" ]; then
+      printf 'ERROR: working directory does not exist: %s\nEXIT CODE: 111\n' "$cwd" >> "$log"
+      printf 'Command not started: working directory does not exist: %s. Log: %s\n' "$cwd" "$log" >&2
+      return 111
+    fi
     (cd "$cwd" && "$@" >> "$log" 2>&1) &
   else
     ("$@" >> "$log" 2>&1) &
@@ -325,7 +370,9 @@ ak_download() {
   # Verify pillar: reuse a cached file that already meets the minimum size instead of refetching.
   if [ -f "$out" ]; then
     local sz
-    sz="$(wc -c < "$out" 2>/dev/null || printf 0)"
+    sz="$(wc -c < "$out" 2>/dev/null)" || sz=0
+    sz="${sz//[[:space:]]/}"
+    case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
     if [ "${sz:-0}" -ge "$min" ]; then
       printf '%s already downloaded: %s\n' "$(basename "$out")" "$out"
       return 0
@@ -366,20 +413,36 @@ ak_resolve_python() {
 
 ak_env_file() { printf '%s/agent-kaizen-setup/env.sh' "$AK_DEVROOT"; }
 
+ak_shell_quote() {
+  # Emit one POSIX-shell single-quoted word, including embedded quotes/newlines.
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 ak_write_env_file() {
   [ "$AK_NO_USER_ENV" -eq 0 ] || return 0
-  local f v d
+  local f v d name value
   f="$(ak_env_file)"
   mkdir -p "$(dirname "$f")"
   {
     printf '# Generated by Agent Kaizen setup. Safe to delete; regenerated on the next setup run.\n'
     for v in "${AK_ENV_VARS[@]:-}"; do
       [ -z "$v" ] && continue
-      printf 'export %s="%s"\n' "${v%%=*}" "${v#*=}"
+      name="${v%%=*}"
+      value="${v#*=}"
+      case "$name" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) ak_die "invalid persisted environment variable name: $name" "$AK_EX_USAGE" ;; esac
+      printf 'export %s=' "$name"
+      ak_shell_quote "$value"
+      printf '\n'
     done
     for d in "${AK_ENV_PATHS[@]:-}"; do
       [ -z "$d" ] && continue
-      printf 'case ":$PATH:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac\n' "$d" "$d"
+      printf 'case ":$PATH:" in *:'
+      ak_shell_quote "$d"
+      printf ':*) ;; *) export PATH='
+      ak_shell_quote "$d"
+      printf ':"$PATH" ;; esac\n'
     done
   } > "$f"
   ak_link_env_file
@@ -387,15 +450,32 @@ ak_write_env_file() {
 
 ak_link_env_file() {
   [ "$AK_NO_USER_ENV" -eq 0 ] || return 0
-  local f rc line
+  local f rc line quoted marker rc_line replaced tmp
   f="$(ak_env_file)"
-  line="[ -f \"$f\" ] && . \"$f\"  # agent-kaizen"
+  quoted="$(ak_shell_quote "$f")"
+  marker='# agent-kaizen-managed-env'
+  line="[ -f $quoted ] && . $quoted  $marker"
   # Always seed ~/.profile; only touch ~/.bashrc / ~/.zshrc if they already exist.
   for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [ "$rc" = "$HOME/.profile" ] || [ -f "$rc" ]; then
-      if [ ! -f "$rc" ] || ! grep -qF '# agent-kaizen' "$rc" 2>/dev/null; then
+      if [ ! -f "$rc" ]; then
         printf '\n%s\n' "$line" >> "$rc"
+        continue
       fi
+      grep -qxF "$line" "$rc" 2>/dev/null && continue
+      tmp="$rc.agent-kaizen.$$"
+      replaced=0
+      : > "$tmp"
+      while IFS= read -r rc_line || [ -n "$rc_line" ]; do
+        if [[ "$rc_line" == *"$marker" || ( "$rc_line" == "[ -f \""* && "$rc_line" == *"  # agent-kaizen" ) ]]; then
+          if [ "$replaced" -eq 0 ]; then printf '%s\n' "$line" >> "$tmp"; replaced=1; fi
+        else
+          printf '%s\n' "$rc_line" >> "$tmp"
+        fi
+      done < "$rc"
+      if [ "$replaced" -eq 0 ]; then printf '\n%s\n' "$line" >> "$tmp"; fi
+      cat "$tmp" > "$rc"
+      rm -f "$tmp"
     fi
   done
 }
@@ -416,6 +496,7 @@ ak_persist_env() {
   # Set NAME=VALUE now and persist it for future shells (replacing any prior value).
   local name="$1" value="$2" e kept=()
   [ -n "$name" ] || return 0
+  case "$name" in [!A-Za-z_]*|*[!A-Za-z0-9_]*) ak_die "invalid environment variable name: $name" "$AK_EX_USAGE" ;; esac
   export "$name=$value"
   for e in "${AK_ENV_VARS[@]:-}"; do
     [ -z "$e" ] && continue
@@ -462,7 +543,7 @@ ak_ensure_rust() {
 # Windows Ensure-Skills so a normal install offers the same skills menu.
 # ---------------------------------------------------------------------------
 ak_install_skills() {
-  # $1 = project root (.agents/.claude live here); $2 = python; $3 = shared skills store dir.
+  # Best-effort skill discovery/clone/link: args are project root, Python, and shared store; failures remain nonfatal.
   local repo="$1" py="$2" store="$3"
   mkdir -p "$store" "$repo/.agents/skills" "$repo/.claude/skills"
   if [ "$AK_NO_NETWORK" -eq 1 ] || [ "$AK_NO_EXTERNAL" -eq 1 ]; then
@@ -472,23 +553,38 @@ ak_install_skills() {
   command -v git >/dev/null 2>&1 || { printf 'skills: git not found; skipping.\n'; return 0; }
   [ -x "$py" ] || py="$(command -v python3 || command -v python || true)"
   [ -n "$py" ] || { printf 'skills: python not found; skipping.\n'; return 0; }
+  ak_assert_network_allowed 'GitHub skill repository discovery'
 
-  local list
-  list="$("$py" - <<'PY' 2>/dev/null
-import json,re,sys,urllib.request
+  local list discovery_log discovery_rc
+  mkdir -p "$AK_LOG_ROOT"
+  discovery_log="$AK_LOG_ROOT/skills-discovery-$(date '+%Y%m%d-%H%M%S').log"
+  printf 'COMMAND: GitHub skill repository discovery\nSTARTED: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" > "$discovery_log"
+  if list="$("$py" - <<'PY' 2>>"$discovery_log"
+import json,re,sys,urllib.parse,urllib.request
 try:
     req=urllib.request.Request("https://api.github.com/users/LevyBytes/repos?per_page=100",headers={"User-Agent":"agent-kaizen"})
     data=json.load(urllib.request.urlopen(req,timeout=20))
-except Exception:
-    sys.exit(0)
+except Exception as error:
+    print(f"ERROR: {error}", file=sys.stderr)
+    sys.exit(1)
 if not isinstance(data,list):
     sys.exit(0)
 for r in sorted(data,key=lambda x:x.get("name","")):
     n=r.get("name","")
     if re.match(r"^AI-SKILL-",n) or re.match(r"^AI-skill-",n):
-        print(re.sub(r"^AI-SKILL-","",re.sub(r"^AI-skill-","skill-",n))+"\t"+r.get("clone_url",""))
+        clone_url=r.get("clone_url","")
+        parsed=urllib.parse.urlparse(clone_url)
+        if parsed.scheme != "https" or parsed.hostname != "github.com":
+            continue
+        print(re.sub(r"^AI-SKILL-","",re.sub(r"^AI-skill-","skill-",n))+"\t"+clone_url)
 PY
-)" || true
+)"; then
+    discovery_rc=0
+  else
+    discovery_rc=$?
+    list=''
+  fi
+  printf 'FINISHED: %s\nEXIT CODE: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$discovery_rc" >> "$discovery_log"
 
   local -a names=() urls=() want=()
   local sname surl
@@ -532,8 +628,10 @@ PY
     printf 'skills: non-interactive; installing skill-drafting only.\n'
   fi
 
-  local n url linked=0 m
+  local n url linked=0 m seen=' '
   for i in "${want[@]}"; do
+    case "$seen" in *" $i "*) continue ;; esac
+    seen="$seen$i "
     n="${names[$i]}"
     url="${urls[$i]}"
     if [ ! -d "$store/$n" ] && [ -n "$url" ]; then
@@ -542,7 +640,8 @@ PY
     fi
     [ -f "$store/$n/SKILL.md" ] || continue
     for m in "$repo/.agents/skills" "$repo/.claude/skills"; do
-      [ -e "$m/$n" ] || ln -s "$store/$n" "$m/$n"
+      if [ -L "$m/$n" ] && [ ! -e "$m/$n" ]; then rm -f "$m/$n"; fi
+      [ -e "$m/$n" ] || [ -L "$m/$n" ] || ln -s "$store/$n" "$m/$n"
     done
     linked=$((linked + 1))
   done

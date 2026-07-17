@@ -17,6 +17,8 @@ setup\install-comfyui.ps1       # CPU torch
 setup\install-comfyui.ps1 -Gpu  # CUDA torch wheel
 ```
 
+`-Gpu` alone uses the cu121 wheel index. Blackwell/RTX 50xx systems also need `-CudaIndex https://download.pytorch.org/whl/cu128` (or a newer compatible index).
+
 ```sh
 bash setup/install-comfyui.sh        # CPU torch
 bash setup/install-comfyui.sh --gpu  # CUDA torch wheel
@@ -53,7 +55,9 @@ Licensing and size make model weights a deliberate manual step.
 ## Start
 
 ```text
+# Windows
 $DEVROOT/ComfyUI/.venv/Scripts/python.exe  $DEVROOT/ComfyUI/main.py
+# Linux/macOS
 $DEVROOT/ComfyUI/.venv/bin/python          $DEVROOT/ComfyUI/main.py
 ```
 
@@ -88,6 +92,10 @@ By default the ComfyUI venv sits at `$DEVROOT/ComfyUI/.venv`. To place it elsewh
 setup\install-comfyui.ps1 -Gpu -CudaIndex https://download.pytorch.org/whl/cu128 -VenvPath $env:DEVROOT\Python\venvs\comfyui
 setx KAIZEN_COMFYUI_VENV $env:DEVROOT\Python\venvs\comfyui
 ```
+
+`setx` applies to new shells. Open a new shell, or also set `$env:KAIZEN_COMFYUI_VENV=$env:DEVROOT+'\Python\venvs\comfyui'` in the current PowerShell session before running `Y6`.
+
+The installer path and runtime environment override are independent; if they differ, `Y6` will not find the moved venv. On Linux, the installer has no venv-relocation flag: create the venv at the target path and `export KAIZEN_COMFYUI_VENV=<path>`.
 
 The runtime home (the cloned repo + `models/`) stays at `$DEVROOT/ComfyUI`; only the venv moves.
 

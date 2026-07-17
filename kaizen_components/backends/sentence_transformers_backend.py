@@ -13,6 +13,7 @@ embedder via the shared ``EmbeddingBackend`` protocol.
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 from ..denials import KaizenDenied
@@ -30,8 +31,16 @@ class SentenceTransformersBackend:
     def __init__(self, *, model: str | None = None) -> None:
         self.model = model or _DEFAULT_MODEL
         self._encoder: Any = None
+        self._load_lock = threading.Lock()
 
     def _load(self) -> Any:
+        if self._encoder is not None:
+            return self._encoder
+        with self._load_lock:
+            return self._load_locked()
+
+    def _load_locked(self) -> Any:
+        """Load exactly once while _load_lock is held."""
         if self._encoder is not None:
             return self._encoder
         from ..quiet import quiet_stderr
@@ -80,8 +89,20 @@ class SentenceTransformersBackend:
                 kw["prompt"] = override
             elif (getattr(encoder, "prompts", None) or {}).get("query"):
                 kw["prompt_name"] = "query"
-        vectors = encoder.encode(list(texts), convert_to_numpy=True, normalize_embeddings=False, **kw)
-        return [[float(value) for value in row] for row in vectors]
+        try:
+            vectors = encoder.encode(texts, convert_to_numpy=True, normalize_embeddings=False, **kw)
+        except Exception as error:  # noqa: BLE001 -- backend failures become stable denials
+            raise KaizenDenied(
+                "DENIED_BACKEND_MODEL",
+                {
+                    "backend": self.name,
+                    "model": self.model,
+                    "reason": str(error),
+                    "required_action": "reduce the batch or check the configured device and model",
+                },
+                exit_code=2,
+            ) from error
+        return vectors.tolist()
 
     def probe(self) -> dict[str, Any]:
         vectors = self.embed(["probe"])

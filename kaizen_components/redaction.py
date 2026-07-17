@@ -15,9 +15,9 @@ from .denials import KaizenDenied
 
 
 _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    # sk-ant- before the generic sk- class so Anthropic keys report under their own name.
+    # The OpenAI pattern explicitly excludes sk-ant-, so each provider reports under its own label.
     ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}")),
-    ("openai_key", re.compile(r"sk-[A-Za-z0-9]{20,}")),
+    ("openai_key", re.compile(r"\bsk-(?!ant-)(?:(?:proj|svcacct|admin)-)?[A-Za-z0-9_\-]{20,}\b")),
     ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("google_api_key", re.compile(r"AIza[0-9A-Za-z_\-]{20,}")),
@@ -32,7 +32,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("assigned_secret", re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token|bearer)\b\s*[:=]\s*\S{6,}")),
     ("bearer_header", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{12,}")),
     # Personal home paths: both separators (C:\Users\, C:/Users/) plus POSIX (/home/, /Users/).
-    ("user_home_path", re.compile(r"(?i)[a-z]:[\\/]users[\\/][^\\/\s\"']+")),
+    ("user_home_path", re.compile(r"(?i)[a-z]:[\\/]users[\\/](?!(?:public|default)\b)[^\\/\s\"']+")),
     ("posix_home_path", re.compile(r"(?<![A-Za-z0-9._/])/(?:home|Users)/[^/\s\"']+")),
 ]
 
@@ -44,6 +44,7 @@ _EMAIL_ALLOW_LOCALPARTS = ("noreply",)
 
 
 def _has_personal_email(text: str) -> bool:
+    """Returns True iff some email in text falls outside the domain-suffix and local-part allowlists."""
     for match in _EMAIL_RE.finditer(text):
         addr = match.group(0).lower()
         if any(addr.endswith(suffix) for suffix in _EMAIL_ALLOW_SUFFIXES):
@@ -55,6 +56,9 @@ def _has_personal_email(text: str) -> bool:
 
 
 def scan_for_secrets(text: str) -> list[str]:
+    """Return matched secret-class labels (plus ``email``); reject non-string input."""
+    if not isinstance(text, str):
+        raise TypeError("text must be str")
     if not text:
         return []
     hits = [name for name, pattern in _SECRET_PATTERNS if pattern.search(text)]
@@ -64,13 +68,25 @@ def scan_for_secrets(text: str) -> list[str]:
 
 
 def assert_redacted(fields: dict[str, Any]) -> None:
-    """Raise :class:`KaizenDenied` if any string field contains secret-like content."""
+    """Raise :class:`KaizenDenied` if any nested string field contains secret-like content."""
+
+    def nested_strings(value: Any, seen: set[int]) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, (dict, list, tuple, set)):
+            return []
+        identity = id(value)
+        if identity in seen:
+            return []
+        seen.add(identity)
+        values = value.values() if isinstance(value, dict) else value
+        return [text for item in values for text in nested_strings(item, seen)]
+
     hits: dict[str, list[str]] = {}
     for field, value in fields.items():
-        if isinstance(value, str):
-            matches = scan_for_secrets(value)
-            if matches:
-                hits[field] = matches
+        matches = sorted({label for text in nested_strings(value, set()) for label in scan_for_secrets(text)})
+        if matches:
+            hits[field] = matches
     if hits:
         raise KaizenDenied(
             "DENIED_TRACE_REDACTION",

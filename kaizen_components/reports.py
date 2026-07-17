@@ -1,13 +1,15 @@
+"""Build R-family reports and the R0 session digest from durable Kaizen records."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .db import fetch_all, fetch_one, new_id, now, write_tx
+from .db import fetch_all, fetch_one, new_id, write_tx
 from .denials import KaizenDenied
 from .hashing import file_sha256, utc_text_hash
 from .paths import EXPORT_ROOT, repo_relative
-from .policy_records import PRIORITY_ORDER_SQL, _priority_rank
+from .policy_records import PRIORITY_ORDER_SQL
 from .text_search import like_pattern
 
 
@@ -49,7 +51,14 @@ _BLOCKING_CONCLUSIONS = ("VERIFICATION_FAILED", "NEEDS_HUMAN_DECISION", "STRUCTU
 
 
 def make_report(args: Any) -> dict[str, Any]:
+    """Builds an R1-R11 markdown report under EXPORT_ROOT/reports, inserts a `reports` row, returns {status,id,path,rows,columns,sha256}; --severity/--actionability are R4(verification_events)-only; R11 requires --query. CONFIRMED."""
     operation = getattr(args, "operation")
+    if operation not in REPORT_MAP:
+        raise KaizenDenied(
+            "DENIED_REPORT_TYPE_INVALID",
+            {"operation": operation, "required_action": f"use one of: {'|'.join(REPORT_MAP)}"},
+            exit_code=2,
+        )
     report_type, table = REPORT_MAP[operation]
     query = getattr(args, "query", None)
     limit = int(getattr(args, "limit", None) or 50)
@@ -101,9 +110,11 @@ def make_report(args: Any) -> dict[str, Any]:
     )
     out_dir = EXPORT_ROOT / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    generated = datetime.now(timezone.utc)
+    generated_at = generated.isoformat()
+    stamp = generated.strftime("%Y%m%dT%H%M%SZ")
     path = out_dir / f"{report_type}-report-{stamp}.md"
-    lines = [f"# {report_type.title()} Report", "", f"Generated: {now()}", f"Rows: {len(rows)}", ""]
+    lines = [f"# {report_type.title()} Report", "", f"Generated: {generated_at}", f"Rows: {len(rows)}", ""]
     for row in rows:
         extras = " ".join(
             f"{name}={row[2 + offset]}" for offset, name in enumerate(extra_columns) if row[2 + offset] not in (None, "")
@@ -120,7 +131,7 @@ def make_report(args: Any) -> dict[str, Any]:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 report_id,
-                now(),
+                generated_at,
                 report_type,
                 getattr(args, "scope", None) or "project",
                 repo_relative(path),
@@ -130,7 +141,11 @@ def make_report(args: Any) -> dict[str, Any]:
             ),
         )
 
-    write_tx(op)
+    try:
+        write_tx(op)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     return {
         "status": "OK",
         "id": report_id,
@@ -158,7 +173,6 @@ def session_digest(args: Any) -> dict[str, Any]:
         {"id": r[0], "priority": r[1], "trigger": r[2], "title": r[3], "summary": r[4], "body": r[5]}
         for r in policies
     ]
-    policy_records.sort(key=lambda item: _priority_rank(item["priority"]))
     gotchas = fetch_all(
         "SELECT id, title, summary, created_at FROM gotcha WHERE status = 'active' "
         "ORDER BY created_at DESC LIMIT ?",
@@ -209,8 +223,8 @@ def session_digest(args: Any) -> dict[str, Any]:
     from .agent_runs import session_digest_sections
 
     orchestration = session_digest_sections(limit)
-    counts.update(orchestration.pop("counts"))
-    return {
+    counts.update(orchestration.pop("counts", {}))
+    result = {
         "status": "OK",
         "message": "Session digest loaded.",
         "policies": policy_records,
@@ -238,3 +252,45 @@ def session_digest(args: Any) -> dict[str, Any]:
             "reload with R0 after compaction"
         ),
     }
+    # v8 M9 fleet visibility: a 'fleet' section ONLY when distribution is on AND fleet.db exists (the
+    # off-mode digest stays byte-identical -- the key is entirely ABSENT). Any failure degrades to a
+    # {status: unavailable} stub and never breaks R0.
+    fleet_section = _fleet_digest_section(limit)
+    if fleet_section is not None:
+        result["fleet"] = fleet_section
+    return result
+
+
+def _fleet_digest_section(limit: int) -> dict[str, Any] | None:
+    """The R0 fleet block, or None when distribution is off / no fleet.db exists.
+
+    Mode off ⇒ None (key absent = off-unchanged exit criterion). Otherwise route through the same
+    daemon-loopback→break-glass path the D8 op uses, wrapped so ANY failure degrades to
+    {status: unavailable, reason} rather than breaking R0."""
+    from .orchestration.modes import dist_mode
+    from .paths import FLEET_DB_PATH
+
+    if dist_mode() == "off" or not FLEET_DB_PATH.exists():
+        return None
+    try:
+        from argparse import Namespace
+
+        from .fleet.records import fleet_digest
+
+        args = Namespace(limit=limit or None, payload_json=None, payload_json_file=None, summary=None)
+        section = fleet_digest(args)
+    except Exception as error:  # noqa: BLE001 -- fleet visibility is advisory; never break the digest
+        return {"status": "unavailable", "reason": type(error).__name__}
+    # v8 M17 built-in metrics (ledger #15): the same advisory posture -- ride the section when they
+    # compute, degrade to a stub key when they do not, never break R0.
+    try:
+        from .fleet import metrics as fleet_metrics_mod
+        from .fleet.records import _route
+
+        section["metrics"] = _route(
+            "fleet/metrics",
+            {"run": lambda store: fleet_metrics_mod.fleet_metrics(store), "wire": {}},
+        )
+    except Exception as error:  # noqa: BLE001 -- metrics are advisory
+        section["metrics"] = {"status": "unavailable", "reason": type(error).__name__}
+    return section

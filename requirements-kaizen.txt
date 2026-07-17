@@ -1,2 +1,4 @@
+# Mandatory dependency-light core; typing-extensions is pinned as a pyturso transitive dependency.
+pynacl==1.6.2
 pyturso==0.6.1
-typing-extensions==4.15.0
+typing-extensions==4.16.0

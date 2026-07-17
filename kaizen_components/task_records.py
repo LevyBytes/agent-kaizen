@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -26,6 +27,7 @@ _TERMINAL_TASK_STATUSES = {"done", "completed", "resolved", "closed"}
 
 
 def _text_arg(args: Any, name: str, default: str = "") -> str:
+    """Resolves a text arg, falling back to `<name>_file` (read_text_file) then `default`."""
     value = getattr(args, name, None)
     if value is None:
         file_value = getattr(args, f"{name}_file", None)
@@ -36,6 +38,7 @@ def _text_arg(args: Any, name: str, default: str = "") -> str:
 
 
 def _base_fields(args: Any, *, title_required: bool = True) -> dict[str, str]:
+    """Assembles common lifecycle fields from args (title required unless `title_required=False`); validates summary/body."""
     title = _text_arg(args, "title", "")
     if title_required and not title:
         raise KaizenDenied(
@@ -58,6 +61,7 @@ def _base_fields(args: Any, *, title_required: bool = True) -> dict[str, str]:
 
 
 def add_lifecycle_record(kind: str, args: Any, *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Insert a lifecycle head + first revision atomically; hash the same mutable fields as updates."""
     table, rev_table, rev_fk, prefix = LIFECYCLE_TABLES[kind]
     fields = _base_fields(args)
     if has_schema(kind):
@@ -76,9 +80,10 @@ def add_lifecycle_record(kind: str, args: Any, *, extra: dict[str, Any] | None =
     revision_id = new_id(f"{prefix}r")
     created = now()
     is_test = 1 if getattr(args, "test", False) else 0  # removable live-test row (K7 purge-test)
-    payload = {**fields, "id": record_id, "extra": extra or {}}
-    content_hash = utc_text_hash(payload)
     extra = extra or {}
+    content_hash = utc_text_hash({
+        "id": record_id, "summary": fields["summary"], "body": fields["body"], "status": fields["status"],
+    })
 
     def op(conn: Any, _attempt: int) -> None:
         columns = [
@@ -143,6 +148,7 @@ def add_lifecycle_record(kind: str, args: Any, *, extra: dict[str, Any] | None =
 
 
 def update_lifecycle_record(kind: str, args: Any) -> dict[str, Any]:
+    """Appends a revision + updates head; enforces task completion gate (terminal status blocked while a linked agent run has live children/unresolved approvals, recomputed on the write conn); `previous_hash` chains the prior head hash."""
     table, rev_table, rev_fk, prefix = LIFECYCLE_TABLES[kind]
     record_id = getattr(args, "id", None)
     if not record_id:
@@ -159,7 +165,6 @@ def update_lifecycle_record(kind: str, args: Any) -> dict[str, Any]:
     validate_text_fields({"summary": summary, "body": body})
     revision_id = new_id(f"{prefix}r")
     created = now()
-    revision_count = fetch_one(f"SELECT COUNT(*) FROM {rev_table} WHERE {rev_fk} = ?", (record_id,))[0]
     content_hash = utc_text_hash({"id": record_id, "summary": summary, "body": body, "status": status})
     gate_terminal = kind == "tasks" and (status or "").strip().lower() in _TERMINAL_TASK_STATUSES
 
@@ -182,6 +187,12 @@ def update_lifecycle_record(kind: str, args: Any) -> dict[str, Any]:
                     },
                     exit_code=2,
                 )
+        current = conn.execute(f"SELECT content_hash FROM {table} WHERE id = ?", (record_id,)).fetchone()
+        if current is None:
+            raise KaizenDenied("DENIED_RECORD_NOT_FOUND", {"id": record_id, "table": table}, exit_code=1)
+        revision_count = conn.execute(
+            f"SELECT COUNT(*) FROM {rev_table} WHERE {rev_fk} = ?", (record_id,),
+        ).fetchone()[0]
         conn.execute(
             f"UPDATE {table} SET updated_at = ?, summary = ?, body = ?, status = ?, "
             "content_hash = ?, current_revision_id = ? WHERE id = ?",
@@ -200,7 +211,7 @@ def update_lifecycle_record(kind: str, args: Any) -> dict[str, Any]:
                 body,
                 status,
                 content_hash,
-                row[3],
+                current[0],
                 getattr(args, "operation", ""),
             ),
         )
@@ -210,6 +221,7 @@ def update_lifecycle_record(kind: str, args: Any) -> dict[str, Any]:
 
 
 def list_records(table: str, args: Any) -> dict[str, Any]:
+    """Recent records DESC (`--limit` default 20); `table` MUST be a trusted literal (identifier is f-string-interpolated, not bound)."""
     limit = int(getattr(args, "limit", None) or 20)
     rows = fetch_all(
         f"SELECT id, status, scope, title, summary, created_at FROM {table} ORDER BY created_at DESC LIMIT ?",
@@ -223,6 +235,7 @@ def list_records(table: str, args: Any) -> dict[str, Any]:
 
 
 def query_records(table: str, args: Any) -> dict[str, Any]:
+    """Escaped-LIKE search over title/summary/body; requires `--query`; same trusted-`table` caveat."""
     query = getattr(args, "query", None) or ""
     if not query:
         raise KaizenDenied("DENIED_QUERY_REQUIRED", {"required_action": "resubmit with --query"}, exit_code=2)
@@ -241,6 +254,7 @@ def query_records(table: str, args: Any) -> dict[str, Any]:
 
 
 def inspect_record(table: str, args: Any) -> dict[str, Any]:
+    """Full row for `--id` via `SELECT *` + `PRAGMA table_info` zip; requires `--id`; trusted-`table` caveat."""
     record_id = getattr(args, "id", None)
     if not record_id:
         raise KaizenDenied("DENIED_ID_REQUIRED", {"required_action": "resubmit with --id"}, exit_code=2)
@@ -252,17 +266,14 @@ def inspect_record(table: str, args: Any) -> dict[str, Any]:
 
 
 def add_ledger_event(args: Any, *, title: str | None = None, body: str | None = None) -> dict[str, Any]:
-    fields = {
-        "task_id": getattr(args, "task_id", None) or None,
-        "scope": getattr(args, "scope", None) or "project",
-        "status": getattr(args, "status", None) or "noted",
-        "title": title or _text_arg(args, "title", "ledger event"),
-        "summary": _text_arg(args, "summary", title or "Ledger event recorded."),
-        "body": body or _text_arg(args, "body", ""),
-        "source_command": getattr(args, "operation", "") or "",
-        "writer_role": getattr(args, "writer_role", None) or "agent",
-    }
-    validate_text_fields({"summary": fields["summary"], "body": fields["body"]})
+    """Writes one append-only ledger_events row (no revision table); `title`/`body` kwargs override arg-derived text; NOTE reads live `args.summary` (see F2 interaction)."""
+    ledger_args = copy.copy(args)
+    ledger_args.title = title or _text_arg(args, "title", "ledger event")
+    ledger_args.summary = _text_arg(args, "summary", title or "Ledger event recorded.")
+    ledger_args.body = body or _text_arg(args, "body", "")
+    ledger_args.status = getattr(args, "status", None) or "noted"
+    fields = _base_fields(ledger_args, title_required=False)
+    fields["task_id"] = fields.pop("source_task_id") or None
     record_id = new_id("led")
     created = now()
     content_hash = utc_text_hash({"id": record_id, **fields})
@@ -317,8 +328,9 @@ def promote_gotcha_to_learning(args: Any) -> dict[str, Any]:
     row = fetch_one("SELECT scope, title, summary, body FROM gotcha WHERE id = ?", (source_id,))
     if row is None:
         raise KaizenDenied("DENIED_RECORD_NOT_FOUND", {"id": source_id, "table": "gotcha"}, exit_code=1)
-    args.scope, args.title, args.summary, args.body = row[0], row[1], row[2], row[3]
-    result = add_lifecycle_record("learning", args, extra={"source_gotcha_id": source_id})
+    promoted_args = copy.copy(args)
+    promoted_args.scope, promoted_args.title, promoted_args.summary, promoted_args.body = row[0], row[1], row[2], row[3]
+    result = add_lifecycle_record("learning", promoted_args, extra={"source_gotcha_id": source_id})
     _transition_promoted_source("gotcha", source_id, "L2", result)
     return result
 
@@ -330,8 +342,9 @@ def promote_learning_to_learned(args: Any) -> dict[str, Any]:
     row = fetch_one("SELECT scope, title, summary, body FROM learning WHERE id = ?", (source_id,))
     if row is None:
         raise KaizenDenied("DENIED_RECORD_NOT_FOUND", {"id": source_id, "table": "learning"}, exit_code=1)
-    args.scope, args.title, args.summary, args.body = row[0], row[1], row[2], row[3]
-    result = add_lifecycle_record("learned", args, extra={"source_learning_id": source_id})
+    promoted_args = copy.copy(args)
+    promoted_args.scope, promoted_args.title, promoted_args.summary, promoted_args.body = row[0], row[1], row[2], row[3]
+    result = add_lifecycle_record("learned", promoted_args, extra={"source_learning_id": source_id})
     _transition_promoted_source("learning", source_id, "L3", result)
     return result
 
@@ -350,7 +363,7 @@ def learned_context(args: Any) -> dict[str, Any]:
         rows = fetch_all(
             "SELECT id, title, summary, created_at, source_learning_id FROM learned "
             "WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' "
-        "ORDER BY created_at DESC LIMIT ?",
+            "ORDER BY created_at DESC LIMIT ?",
             (pattern, pattern, pattern, limit),
         )
     else:
@@ -394,4 +407,20 @@ def learned_context(args: Any) -> dict[str, Any]:
 
 
 def version_payload() -> dict[str, Any]:
+    """Returns TOOL_VERSION status payload (trivial; minor gap)."""
     return {"status": "OK", "tool_version": TOOL_VERSION}
+
+
+__all__ = [
+    "LIFECYCLE_TABLES",
+    "add_ledger_event",
+    "add_lifecycle_record",
+    "inspect_record",
+    "learned_context",
+    "list_records",
+    "promote_gotcha_to_learning",
+    "promote_learning_to_learned",
+    "query_records",
+    "update_lifecycle_record",
+    "version_payload",
+]

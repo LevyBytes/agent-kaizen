@@ -1,4 +1,4 @@
-"""Interactive terminal script for building side-scroller parallax image prompts."""
+"""Windows-first interactive parallax prompt builder with atomically persisted sibling-log state."""
 
 from __future__ import annotations
 
@@ -14,9 +14,11 @@ from ctypes import wintypes
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 
 
+# Force deterministic Unicode output for Windows terminals and redirected streams.
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
@@ -182,6 +184,7 @@ MODE_KEYS = OrderedDict(
         ("n", "new panel"),
     )
 )
+CONTINUE_MODE_NUMBER = str(len(START_MODES) + 1)
 
 MODE_DESCRIPTIONS = {
     "new panel": "standalone first panel of a layer",
@@ -314,6 +317,7 @@ class HistoryEntry:
     Each object becomes one line in the RUN HISTORY section of the sibling
     log. World and mood are recorded per run so earlier world/mood combos can
     be reused with the h command even after the current settings change.
+    ``reprint_only`` marks a replay of an existing prompt rather than a new generation.
     """
 
     timestamp: str
@@ -341,7 +345,7 @@ class ContinueSession:
     The prompt entry is the newest history line in that chain. The accepted
     entry is the newest line with a matching saved image file. The suggested
     next mode/layer/panel values are previewed before the user accepts or edits
-    them.
+    them. ``status`` is one of ``pending output``, ``active``, ``layer complete``, or ``ambiguous``.
     """
 
     root_id: str
@@ -439,19 +443,24 @@ def read_log() -> tuple[OrderedDict[str, str], list[HistoryEntry], list[str], bo
                 continue
             if key == "mode" and value not in START_MODES:
                 settings[key] = DEFAULT_SETTINGS[key]
+                issues.append(f"mode on line {line_number} reset to default")
                 seen_settings.add(key)
                 continue
             if key == "groundline_pct" and not is_int(value):
                 issues.append(f"groundline_pct on line {line_number} reset to default")
+                seen_settings.add(key)
                 continue
             if key == "copy_to_clipboard" and not is_yes_no(value):
                 issues.append(f"copy_to_clipboard on line {line_number} reset to default")
+                seen_settings.add(key)
                 continue
             if key == "backup_mode" and value not in BACKUP_MODES:
                 issues.append(f"backup_mode on line {line_number} reset to default")
+                seen_settings.add(key)
                 continue
             if not value:
                 issues.append(f"{key} on line {line_number} reset to default")
+                seen_settings.add(key)
                 continue
             settings[key] = value
             seen_settings.add(key)
@@ -467,6 +476,7 @@ def read_log() -> tuple[OrderedDict[str, str], list[HistoryEntry], list[str], bo
                 if not parsed.mood:
                     parsed.mood = settings["mood"]
                 if parsed.panel_number < 1:
+                    # Legacy rows lack chain metadata, so parsed-row order is the best available estimate.
                     parsed.panel_number = min(len(history) + 1, parsed.panels_planned)
                 history.append(parsed)
         else:
@@ -571,8 +581,15 @@ def write_log(settings: OrderedDict[str, str], history: list[HistoryEntry]) -> N
     content = "\n".join(lines) + "\n"
 
     tmp_path = LOG_PATH.with_name(LOG_PATH.name + ".tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    os.replace(tmp_path, LOG_PATH)
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, LOG_PATH)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def format_history_entry(entry: HistoryEntry) -> str:
@@ -694,21 +711,6 @@ def prompt_text(prompt: str, default: str, allow_back: bool = False) -> str:
     if handle_navigation_command(answer, allow_back):
         return prompt_text(prompt, default, allow_back=allow_back)
     return default if answer == "" else clean_for_log(answer)
-
-
-def format_prompt_hint(label: str, value: str, width: int = 70) -> str:
-    """Build one labeled bracket hint for an interactive prompt.
-
-    The label explains where the shown value came from, such as previous,
-    example, or current setting. Long values are shortened for display only;
-    the full value is still used when the user presses Enter.
-    """
-    return f"[{label}: {truncate(value, width)}]"
-
-
-def join_prompt_hints(*hints: str) -> str:
-    """Join non-empty prompt hints with spaces for readable terminal output."""
-    return " ".join(hint for hint in hints if hint)
 
 
 def format_prompt_controls(
@@ -894,6 +896,7 @@ def prompt_text_with_history(
     """
     while True:
         hints = [(default_label, default)]
+        # Preserve the baseline example when the default came from history, even if text matches.
         if example is not None and (example != default or default_label == "previous"):
             hints.append((example_label, example))
         answer = prompt_block(
@@ -1011,7 +1014,7 @@ def read_workspace_json(workspace_path: Path) -> tuple[dict[str, object] | None,
 def workspace_folder_roots(
     workspace_data: dict[str, object], workspace_path: Path
 ) -> dict[str, Path]:
-    """Map VS Code workspace folder names to resolved local paths."""
+    """Map folder names last-wins and add ``default`` for the first valid workspace folder."""
     roots: dict[str, Path] = {}
     folders = workspace_data.get("folders", [])
     if not isinstance(folders, list):
@@ -1042,6 +1045,7 @@ def expand_workspace_folder_vars(
         roots["default"] = REPO_ROOT
 
     def replace_match(match: re.Match[str]) -> str:
+        """Resolve one workspaceFolder placeholder against named or default roots."""
         folder_name = match.group(1)
         if folder_name:
             return str(roots.get(folder_name, REPO_ROOT))
@@ -1053,7 +1057,7 @@ def expand_workspace_folder_vars(
 def resolve_workspace_path(
     value: str, workspace_data: dict[str, object], workspace_path: Path
 ) -> Path:
-    """Resolve a workspace path setting to an absolute local path."""
+    """Expand workspace variables, but resolve any remaining relative path against ``REPO_ROOT``."""
     expanded = expand_workspace_folder_vars(value.strip(), workspace_data, workspace_path)
     path = Path(expanded)
     if path.is_absolute():
@@ -1403,8 +1407,8 @@ def walk_settings(
     A copy of the settings is edited and returned with a boolean that tells the
     caller whether anything changed. `mode` is skipped here because it is
     already the first question of every run; its SETTINGS entry only remembers
-    the last-used default. World and mood can reuse RUN HISTORY values because
-    those are the persistent settings with useful per-run history.
+    the last-used default. World and mood can reuse RUN HISTORY values when
+    history exists because those are the persistent settings with useful per-run history.
     """
     history = history or []
     updated = OrderedDict(settings)
@@ -1469,12 +1473,14 @@ def print_mode_menu() -> None:
     print("modes:")
     for index, (key, mode_name) in enumerate(MODE_KEYS.items(), start=1):
         print(f"  {index} / {key:<2} - {mode_name}: {MODE_DESCRIPTIONS[mode_name]}")
-    print("  2 / c  - continue/resume: continue an existing panel session")
+    print(f"  {CONTINUE_MODE_NUMBER} / c  - continue/resume: continue an existing panel session")
     print("commands: r = reprint last prompt | s = settings | h = history options")
 
 
 def truncate(value: str, width: int) -> str:
     """Shorten display text to a fixed width with an ellipsis."""
+    if width <= 0:
+        return ""
     return value if len(value) <= width else value[: width - 1] + "…"
 
 
@@ -1587,7 +1593,7 @@ def asset_filename_stems(
 
 
 def asset_family_version(filename: str, stem: str) -> int | None:
-    """Return the version number when filename belongs to a stem's PNG family."""
+    """Return 1 for the canonical PNG, N for a case-insensitive ``-vNN`` member, or None."""
     if filename.lower() == f"{stem}.png".lower():
         return 1
     match = re.fullmatch(rf"{re.escape(stem)}-v(\d{{2,}})\.png", filename, re.IGNORECASE)
@@ -1612,6 +1618,7 @@ def image_family_paths(
     seen: set[str] = set()
 
     def add(path: Path) -> None:
+        """Append one path once using a case-insensitive identity key."""
         key = str(path).lower()
         if key not in seen:
             paths.append(path)
@@ -1639,27 +1646,23 @@ def accepted_output_path(
     settings: OrderedDict[str, str], run: HistoryEntry
 ) -> Path | None:
     """Return the newest non-empty saved image path for an accepted panel."""
-    candidates: list[tuple[float, str, Path]] = []
+    candidates: list[tuple[float, int, str, Path]] = []
     for path in accepted_output_paths(settings, run):
         try:
             if path.is_file() and path.stat().st_size > 0:
-                candidates.append((path.stat().st_mtime, path.name.lower(), path))
+                version_match = re.search(r"-v(\d{2,})\.png$", path.name, re.IGNORECASE)
+                version = int(version_match.group(1)) if version_match else 1
+                candidates.append((path.stat().st_mtime, version, path.name.lower(), path))
         except OSError:
             continue
     if candidates:
-        return max(candidates, key=lambda item: (item[0], item[1]))[2]
+        return max(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
     return None
 
 
 def accepted_output_exists(settings: OrderedDict[str, str], run: HistoryEntry) -> bool:
     """Return True when a history entry has a non-empty saved image output."""
     return accepted_output_path(settings, run) is not None
-
-
-def history_root_id(entry: HistoryEntry, index: int) -> str:
-    """Return the explicit continue-root id used to group a history entry."""
-    _ = index
-    return entry.root_id
 
 
 def reference_panel_entries(
@@ -1677,7 +1680,7 @@ def reference_panel_entries(
 
     by_panel: dict[int, tuple[int, HistoryEntry, Path]] = {}
     for index, entry in enumerate(history):
-        if history_root_id(entry, index) != target_root:
+        if entry.root_id != target_root:
             continue
         if entry.layer != run.layer:
             continue
@@ -1722,7 +1725,11 @@ def reference_panels_section(
 def find_continue_sessions(
     settings: OrderedDict[str, str], history: list[HistoryEntry]
 ) -> list[ContinueSession]:
-    """Build resumable chains from history, newest latest entry first."""
+    """Build newest-first chains, classifying ambiguous, pending, active, and layer-complete state.
+
+    Empty roots are excluded, duplicate session ids make a chain ambiguous, and next mode/layer/panel
+    values derive from the latest accepted output or the still-pending prompt.
+    """
     session_counts: dict[str, int] = {}
     for entry in history:
         if entry.session_id:
@@ -1733,7 +1740,7 @@ def find_continue_sessions(
 
     chains: dict[str, list[tuple[int, HistoryEntry]]] = {}
     for index, entry in enumerate(history):
-        root_id = history_root_id(entry, index)
+        root_id = entry.root_id
         if not root_id:
             continue
         chains.setdefault(root_id, []).append((index, entry))
@@ -1850,22 +1857,9 @@ def choose_continue_session(
         print(f"  {index}. {describe_continue_session(session)} | {selectable}")
 
     recommended = next(
-        (
-            index
-            for index, session in enumerate(sessions, start=1)
-            if session.status in {"pending output", "active"}
-        ),
-        None,
+        (index for index, session in enumerate(sessions, start=1) if session.status in {"pending output", "active"}),
+        next((index for index, session in enumerate(sessions, start=1) if session.status != "ambiguous"), None),
     )
-    if recommended is None:
-        recommended = next(
-            (
-                index
-                for index, session in enumerate(sessions, start=1)
-                if session.status != "ambiguous"
-            ),
-            None,
-        )
     if recommended is None:
         print("All continue sessions are ambiguous; start a new panel instead.")
         return None
@@ -2358,7 +2352,7 @@ def ask_mode(
                 history=True,
                 typed="type number/mode",
                 allow_back=False,
-                extra=("2/c=continue", "r=last", "s=settings"),
+                extra=(f"{CONTINUE_MODE_NUMBER}/c=continue", "r=last", "s=settings"),
             ),
         ).lower()
         if handle_navigation_command(answer, allow_back=False):
@@ -2371,7 +2365,6 @@ def ask_mode(
             output = build_output_safely(
                 settings=settings,
                 run=history[-1],
-                run_number=len(history),
                 history=history,
                 pillow_status=pillow_status,
             )
@@ -2385,7 +2378,7 @@ def ask_mode(
             settings.update(new_settings)
             write_log(settings, history)
             continue
-        if value in {"2", "c", "continue", "resume"}:
+        if value in {CONTINUE_MODE_NUMBER, "c", "continue", "resume"}:
             continue_run = ask_continue_run(settings, history)
             if continue_run is not None:
                 return continue_run.mode, None, continue_run
@@ -2401,7 +2394,7 @@ def ask_mode(
         if mode is not None:
             settings["mode"] = mode
             return mode, template, None
-        print("Choose 1/new panel, 2/continue, or r / s / h.")
+        print(f"Choose 1/new panel, {CONTINUE_MODE_NUMBER}/continue, or r / s / h.")
 
 
 def ask_layer(
@@ -2448,7 +2441,7 @@ def ask_run(
     history: list[HistoryEntry],
     pillow_status: PillowStatus | None = None,
 ) -> HistoryEntry:
-    """Ask all per-run questions and return them as a HistoryEntry.
+    """Run the nine-step interview with GoBack rewind and SKY's hidden-matte step skipped.
 
     Defaults come from the reused template run when the user picked one with
     the h command, otherwise from the previous run and the current settings.
@@ -2625,7 +2618,7 @@ def ask_run(
                     )
             elif step == 7:
                 if "panels_planned" in answers:
-                    panels_default: int | str = str(answers["panels_planned"])
+                    panels_default: int | str = int(answers["panels_planned"])
                     panels_label = "current answer"
                 else:
                     panels_default = (
@@ -2648,7 +2641,7 @@ def ask_run(
                     answers["panel_number"] = 1
                 else:
                     if "panel_number" in answers:
-                        panel_default: int | str = str(answers["panel_number"])
+                        panel_default: int | str = int(answers["panel_number"])
                         panel_label = "current answer"
                     elif template and template.panel_number:
                         panel_default = min(template.panel_number, panels_planned_value)
@@ -2672,6 +2665,7 @@ def ask_run(
             if step == 0:
                 print("Already at the first question; there is nowhere to go back.")
             elif step == 3 and str(answers.get("layer")) == "SKY":
+                # SKY never enters matte step 2, so rewind directly to its preceding layer step.
                 step = 1
             else:
                 step -= 1
@@ -2990,7 +2984,6 @@ def build_extend_snippet(
 def build_output(
     settings: OrderedDict[str, str],
     run: HistoryEntry,
-    run_number: int,
     history: list[HistoryEntry] | None = None,
     pillow_status: PillowStatus | None = None,
 ) -> str:
@@ -3032,7 +3025,6 @@ def build_output(
 def build_output_safely(
     settings: OrderedDict[str, str],
     run: HistoryEntry,
-    run_number: int,
     history: list[HistoryEntry] | None = None,
     pillow_status: PillowStatus | None = None,
 ) -> str | None:
@@ -3041,7 +3033,7 @@ def build_output_safely(
     This lets the main flow fail cleanly without appending a bad run to history.
     """
     try:
-        return build_output(settings, run, run_number, history, pillow_status)
+        return build_output(settings, run, history, pillow_status)
     except RuntimeError as exc:
         print(f"Prompt failed verification and was not emitted: {exc}")
         return None
@@ -3083,7 +3075,13 @@ def filename_date(timestamp: str) -> str:
     digits = re.sub(r"\D+", "", timestamp)
     if len(digits) >= 8:
         return digits[:8]
+    if timestamp not in WARNED_BAD_FILENAME_TIMESTAMPS:
+        WARNED_BAD_FILENAME_TIMESTAMPS.add(timestamp)
+        print(f"Warning: malformed history timestamp {timestamp!r}; using 00000000 in filenames.", file=sys.stderr)
     return "00000000"
+
+
+WARNED_BAD_FILENAME_TIMESTAMPS: set[str] = set()
 
 
 FILENAME_STOPWORDS = {
@@ -3197,7 +3195,8 @@ def non_overwriting_path(path: Path, content: str) -> tuple[Path, bool, str]:
     """Choose a Markdown path without replacing existing different content.
 
     Returns the selected path, whether the caller should write content there,
-    and a short status label: new, identical, versioned, or versioned-identical.
+    and a short status label: new, identical, versioned, or versioned-identical. Version numbers use
+    at least two digits and may reach 999; exhaustion raises RuntimeError.
     """
     if not path.exists():
         return path, True, "new"
@@ -3221,7 +3220,7 @@ def non_overwriting_path(path: Path, content: str) -> tuple[Path, bool, str]:
 
 
 def save_text_without_overwrite(path: Path, content: str, label: str) -> Path:
-    """Save text to a Markdown file without overwriting different content."""
+    """Save non-empty text without overwriting different content, then verify a non-empty file."""
     target, should_write, status = non_overwriting_path(path, content)
     if should_write:
         target.write_text(content, encoding="utf-8")
@@ -3264,11 +3263,17 @@ def output_image_paths(
 def next_available_asset_filename(
     settings: OrderedDict[str, str], run: HistoryEntry, panel_number: int | None = None
 ) -> str:
-    """Return a non-overwriting image filename for the current asset family."""
+    """Return a free canonical or minimum-two-digit ``-vNN`` family name, raising after version 999."""
     canonical = asset_filename(run, panel_number)
     stem = Path(canonical).stem
     folder = absolute_artifact_folder(settings["output_folder"])
     existing_versions: set[int] = set()
+
+    try:
+        if not (folder / canonical).exists():
+            return canonical
+    except OSError:
+        pass
 
     for path in image_family_paths(
         settings, run, panel_number=panel_number, include_legacy=False
@@ -3349,7 +3354,7 @@ def join_repo_relative_path(folder: str, filename: str) -> str:
 
 
 def to_repo_relative_path(value: str) -> str:
-    """Convert an absolute or relative path setting into a repo-relative path."""
+    """Return a repo-relative path when possible, preserving cross-drive absolute paths."""
     raw = value.strip()
     if not raw:
         return "."
@@ -3359,7 +3364,10 @@ def to_repo_relative_path(value: str) -> str:
         try:
             relative = path.resolve().relative_to(REPO_ROOT)
         except ValueError:
-            relative = Path(os.path.relpath(path, REPO_ROOT))
+            try:
+                relative = Path(os.path.relpath(path, REPO_ROOT))
+            except ValueError:
+                return path.as_posix()
     else:
         relative = path
 
@@ -3398,15 +3406,9 @@ def verify_prompt(prompt: str) -> None:
         )
 
 
-def copy_to_clipboard(text: str) -> tuple[bool, str]:
-    """Copy text to the Windows clipboard using only the standard library.
-
-    Returns a success flag and an error message. On success, the message is an
-    empty string.
-    """
-    if os.name != "nt":
-        return False, "clipboard copy is only implemented for Windows"
-
+@cache
+def _clipboard_apis() -> tuple[object, object]:
+    """Configure and cache the Windows clipboard API handles."""
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
 
@@ -3427,6 +3429,19 @@ def copy_to_clipboard(text: str) -> tuple[bool, str]:
     kernel32.GlobalUnlock.restype = wintypes.BOOL
     kernel32.GlobalFree.argtypes = [wintypes.HANDLE]
     kernel32.GlobalFree.restype = wintypes.HANDLE
+    return user32, kernel32
+
+
+def copy_to_clipboard(text: str) -> tuple[bool, str]:
+    """Copy text to the Windows clipboard using only the standard library.
+
+    Returns a success flag and error text. SetClipboardData success transfers HGLOBAL ownership to
+    Windows; every earlier failure frees the handle locally.
+    """
+    if os.name != "nt":
+        return False, "clipboard copy is only implemented for Windows"
+
+    user32, kernel32 = _clipboard_apis()
 
     cf_unicode_text = 13
     gmem_moveable = 0x0002
@@ -3470,11 +3485,6 @@ def clipboard_payload(output: str) -> str:
     return output[start + len(OPENING_MARKER):end].strip("\n")
 
 
-def backup_filename(run: HistoryEntry) -> str:
-    """Build the optional user backup filename for one generated prompt."""
-    return prompt_artifact_filename(run, "backup")
-
-
 def save_prompt_backup(
     settings: OrderedDict[str, str], prompt_text_value: str, run: HistoryEntry
 ) -> Path | None:
@@ -3504,7 +3514,7 @@ def save_prompt_backup(
     except UserQuit:
         print("\nBackup skipped.")
         return None
-    path = folder / backup_filename(run)
+    path = folder / prompt_artifact_filename(run, "backup")
     try:
         return save_text_without_overwrite(path, prompt_text_value + "\n", "prompt backup")
     except (OSError, RuntimeError) as exc:
@@ -3533,10 +3543,7 @@ def save_script_prompt_archive(
         saved_path = save_text_without_overwrite(
             path, prompt_text_value + "\n", "script prompt archive"
         )
-    except OSError as exc:
-        print(f"Warning: script prompt archive was not saved: {exc}")
-        return None
-    except RuntimeError as exc:
+    except (OSError, RuntimeError) as exc:
         print(f"Warning: script prompt archive was not saved: {exc}")
         return None
 
@@ -3555,7 +3562,10 @@ def console_will_close_on_exit() -> bool:
         return False
     try:
         process_list = (wintypes.DWORD * 8)()
-        count = ctypes.windll.kernel32.GetConsoleProcessList(process_list, 8)
+        get_processes = ctypes.windll.kernel32.GetConsoleProcessList
+        get_processes.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+        get_processes.restype = wintypes.DWORD
+        count = get_processes(process_list, 8)
     except (AttributeError, OSError):
         return True  # fall back to the cautious isatty heuristic: pause
     if count == 0:
@@ -3584,10 +3594,10 @@ def pause_before_exit_if_needed() -> None:
             pass
 
 
-def emit_output(settings: OrderedDict[str, str], output: str) -> None:
+def emit_output(settings: OrderedDict[str, str], output: str, payload: str | None = None) -> None:
     """Copy the prompt to the clipboard when enabled, then print all output."""
     if is_enabled(settings["copy_to_clipboard"]):
-        copied, message = copy_to_clipboard(clipboard_payload(output))
+        copied, message = copy_to_clipboard(payload if payload is not None else clipboard_payload(output))
         if copied:
             print("Copied generated prompt to clipboard.")
         else:
@@ -3611,8 +3621,7 @@ def ensure_run_metadata(run: HistoryEntry, history: list[HistoryEntry]) -> None:
 def main() -> int:
     """Run the interactive prompt builder and return a process exit code.
 
-    A zero return means success. Nonzero values are used for interruption or
-    prompt verification failure.
+    Return 0 for success or clean quit, 1 for build/EOF failure, and 130 for KeyboardInterrupt.
     """
     settings, history, issues, first_run = read_log()
     if issues:
@@ -3633,7 +3642,7 @@ def main() -> int:
 
         if run.reprint_only:
             output = build_output_safely(
-                settings, run, len(history), history, pillow_status
+                settings, run, history=history, pillow_status=pillow_status
             )
             if output is None:
                 return 1
@@ -3645,7 +3654,7 @@ def main() -> int:
         # Build (and verify) before logging so a failed build never records a
         # history line that would poison later `last` runs.
         output = build_output_safely(
-            settings, run, len(history) + 1, history, pillow_status
+            settings, run, history=history, pillow_status=pillow_status
         )
         if output is None:
             return 1
@@ -3654,7 +3663,7 @@ def main() -> int:
         history.append(run)
         write_log(settings, history)
         save_script_prompt_archive(settings, run, prompt_payload)
-        emit_output(settings, output)
+        emit_output(settings, output, prompt_payload)
         save_prompt_backup(settings, prompt_payload, run)
         return 0
     except KeyboardInterrupt:

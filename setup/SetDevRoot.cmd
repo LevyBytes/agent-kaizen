@@ -69,6 +69,7 @@ if /i "%~1"=="/?"       goto usage
 if /i "%~1"=="/help"    goto usage
 if /i "%~1"=="-h"       goto usage
 if /i "%~1"=="--help"   goto usage
+if /i "%~1"=="help"     goto usage
 if /i "%~1"=="/nopause" ( set "NOPAUSE=1" & shift /1 & goto parse_args )
 if /i "%~1"=="-q"       ( set "NOPAUSE=1" & shift /1 & goto parse_args )
 if /i "%~1"=="/planonly"  ( set "PLANONLY=1" & shift /1 & goto parse_args )
@@ -103,6 +104,7 @@ set "CURRENT="
 for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v DEVROOT 2^>nul ^| find /i "DEVROOT"') do set "CURRENT=%%B"
 if defined CURRENT (
   echo Current persisted DEVROOT: "%CURRENT%"
+  for %%I in ("%CURRENT%") do set "CURRENT_N=%%~fI"
 ) else (
   echo Current persisted DEVROOT: ^(not set^)
 )
@@ -153,7 +155,7 @@ if errorlevel 1 goto end
 
 REM --- Already correct? -------------------------------------------------------
 if not defined CURRENT goto check_conflict
-if /i "%CURRENT%"=="%TARGET%" (
+if /i "%CURRENT_N%"=="%TARGET%" (
   echo.
   echo DEVROOT is already set to "%CURRENT%".  No change needed.
   set "FINAL_RC=0"
@@ -172,6 +174,7 @@ echo DEVROOT is currently: "%CURRENT%"
 echo New value would be:    "%TARGET%"
 set "ANS="
 set /p "ANS=Overwrite DEVROOT? [y/N] "
+set "ANS=%ANS:"=%"
 if /i not "%ANS%"=="Y" goto user_declined
 
 :do_set
@@ -228,6 +231,7 @@ if not defined ANYSIB echo   WARNING: none of the expected siblings were found h
 goto end
 
 :choose_target_menu
+REM Sets a validated TARGET from D:\dev, C:\dev, or a custom path; Cancel returns 1.
 echo.
 echo Choose where Agent Kaizen should keep repos, tools, and setup logs:
 if exist "D:\" (
@@ -237,7 +241,9 @@ if exist "D:\" (
 )
 echo   2^) C:\dev
 echo   3^) Custom path
-choice /C 123 /N /M "DEVROOT [1/2/3]: "
+echo   C^) Cancel
+choice /C 123C /N /M "DEVROOT [1/2/3/C]: "
+if errorlevel 4 exit /b 1
 if errorlevel 3 goto choose_custom_target
 if errorlevel 2 (
   set "TARGET=C:\dev"
@@ -256,6 +262,7 @@ goto confirm_target_choice
 echo.
 set "TARGET="
 set /p "TARGET=Custom DEVROOT path: "
+set "TARGET=%TARGET:"=%"
 if not defined TARGET (
   echo ERROR: custom DEVROOT cannot be blank.
   goto choose_target_menu
@@ -274,6 +281,7 @@ if errorlevel 2 goto choose_target_menu
 exit /b 0
 
 :validate_target
+REM Fully qualify TARGET; require a non-root drive path outside Windows and Program Files.
 if not defined TARGET (
   call :target_invalid "DEVROOT cannot be blank."
   exit /b 1
@@ -310,6 +318,7 @@ set "FINAL_DEVROOT=%CURRENT%"
 exit /b 1
 
 :reject_if_under_env
+REM Args: environment-variable name and display name. Reject TARGET inside that root.
 setlocal
 set "ENV_NAME=%~1"
 set "DISPLAY_NAME=%~2"
@@ -323,19 +332,14 @@ if not errorlevel 1 (
 endlocal & exit /b 0
 
 :is_under
+REM Exit 0 when arg1 equals or descends from arg2 at a path-component boundary; else 1.
 setlocal
-set "CHILD=%~f1"
-set "PARENT=%~f2"
-if not defined PARENT ( endlocal & exit /b 1 )
-if /i "%CHILD%"=="%PARENT%" ( endlocal & exit /b 0 )
-if "%PARENT:~-1%"=="\" (
-  set "PREFIX=%PARENT%"
-) else (
-  set "PREFIX=%PARENT%\"
-)
-call set "REST=%%CHILD:%PREFIX%=%%"
-if /i not "%REST%"=="%CHILD%" ( endlocal & exit /b 0 )
-endlocal & exit /b 1
+set "AK_CHILD=%~f1"
+set "AK_PARENT=%~f2"
+if not defined AK_PARENT ( endlocal & exit /b 1 )
+powershell.exe -NoProfile -NonInteractive -Command "$c=$env:AK_CHILD.TrimEnd('\');$p=$env:AK_PARENT.TrimEnd('\');if($c.Equals($p,[StringComparison]::OrdinalIgnoreCase) -or $c.StartsWith($p+'\',[StringComparison]::OrdinalIgnoreCase)){exit 0};exit 1"
+set "AK_UNDER_RC=%ERRORLEVEL%"
+endlocal & exit /b %AK_UNDER_RC%
 
 :usage
 echo.
@@ -363,6 +367,7 @@ echo needed. Exit codes: 0 set/already-correct, 1 error, 2 declined.
 endlocal & exit /b 0
 
 :liststeps
+REM /liststeps is static and exits before target selection; /planonly selects and validates.
 echo.
 echo Planned SetDevRoot steps:
 echo   1. Choose DEVROOT from explicit path, current DEVROOT, D:\dev, or the menu.
@@ -383,6 +388,7 @@ goto end
 
 :end
 REM --- Single exit point: summarise, pause (unless /nopause), export, exit -----
+if not defined FINAL_RC set "FINAL_RC=1"
 echo.
 if "%FINAL_RC%"=="0" (
   echo Done.
