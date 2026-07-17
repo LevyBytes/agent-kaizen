@@ -546,6 +546,13 @@ class Supervisor:
         except (UnicodeDecodeError, ValueError, KeyError, TypeError):
             return None
 
+    def _read_pidfile_for_claim(self) -> tuple[int, str] | None:
+        """Read claim state, translating unsafe pidfiles into a locked denial."""
+        try:
+            return self._read_pidfile()
+        except (OSError, WorkspacePathError):
+            raise SingleInstanceError(0, "locked") from None
+
     def _claim_single_instance(self) -> None:
         if self._instance_lock is not None:
             return
@@ -554,13 +561,13 @@ class Supervisor:
                 self._instance_lock_relative,
             )
         except (OSError, WorkspacePathError):
-            existing = self._read_pidfile()
+            existing = self._read_pidfile_for_claim()
             pid, nonce = existing if existing is not None else (0, "locked")
             raise SingleInstanceError(pid, nonce) from None
         pidfile_bytes: bytes | None = None
         tokenfile_bytes: bytes | None = None
         try:
-            existing = self._read_pidfile()
+            existing = self._read_pidfile_for_claim()
             if existing is not None:
                 pid, nonce = existing
                 if pid != os.getpid() and children.pid_alive(pid):

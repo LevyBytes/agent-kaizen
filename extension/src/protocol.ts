@@ -5,7 +5,8 @@
  * Wire: ONE JSON object `{op, args, token}` + "\n" per connection; epoch is handler-optional and
  * this client omits it. The server replies with one JSON line and closes. Transports, in daemon preference order: Windows named pipe
  * `\\.\pipe\kaizen-<sha256(lowercased resolved repo root)[:16]>`, TCP fallback advertised in the
- * owner-only `<runtime>/control.addr`, POSIX UDS `<runtime>/control.sock`. The shared token is minted
+ * owner-only `<runtime>/control.addr`, POSIX UDS `<runtime>/control.sock` with the same TCP fallback
+ * when the workspace path exceeds the platform UDS limit. The shared token is minted
  * at daemon start into `<runtime>/control.token`; the server refuses DENIED_LOOPBACK_AUTH without it.
  *
  * Pure Node (no vscode import) so the whole module is unit-testable under node:test.
@@ -66,6 +67,23 @@ export function readToken(repoRoot: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Read one exact loopback TCP address from the owner-only endpoint file. */
+function readControlAddress(repoRoot: string, missingMessage: string): { host: string; port: number } {
+  let addr: string;
+  try {
+    addr = fs.readFileSync(path.join(runtimeDir(repoRoot), "control.addr"), "utf-8").trim();
+  } catch {
+    throw new DaemonUnreachable(missingMessage);
+  }
+  const i = addr.lastIndexOf(":");
+  const host = addr.slice(0, i);
+  const port = Number(addr.slice(i + 1));
+  if (host !== "127.0.0.1" || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new DaemonUnreachable("malformed control.addr");
+  }
+  return { host, port };
 }
 
 /** Perform one JSON-line exchange; every rejection is a LoopbackAttemptError. */
@@ -138,20 +156,13 @@ export async function request(
       // response, close, or post-connect error may follow an accepted request and must never replay it.
       if (!(error instanceof LoopbackAttemptError) || !error.fallbackSafe) throw error;
     }
-    let addr: string;
-    try {
-      addr = fs.readFileSync(path.join(runtimeDir(repoRoot), "control.addr"), "utf-8").trim();
-    } catch {
-      throw new DaemonUnreachable("no loopback transport (pipe/addr) present");
-    }
-    const i = addr.lastIndexOf(":");
-    const port = Number(addr.slice(i + 1));
-    if (i < 1 || !Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new DaemonUnreachable("malformed control.addr");
-    }
+    const { host, port } = readControlAddress(repoRoot, "no loopback transport (pipe/addr) present");
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new DaemonUnreachable(LOOPBACK_TIMEOUT);
-    return exchange({ host: addr.slice(0, i), port }, payload, remainingMs);
+    return exchange({ host, port }, payload, remainingMs);
   }
-  return exchange({ path: path.join(runtimeDir(repoRoot), "control.sock") }, payload, timeoutMs);
+  const socketPath = path.join(runtimeDir(repoRoot), "control.sock");
+  if (fs.existsSync(socketPath)) return exchange({ path: socketPath }, payload, timeoutMs);
+  const { host, port } = readControlAddress(repoRoot, "no loopback transport (uds/addr) present");
+  return exchange({ host, port }, payload, timeoutMs);
 }

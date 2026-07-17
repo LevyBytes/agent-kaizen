@@ -5,6 +5,8 @@ import * as path from "node:path";
 
 let root: string | undefined;
 let ownsRoot = false;
+const ownedSocketRoots = new Set<string>();
+const MAX_POSIX_SOCKET_PATH_BYTES = 103;
 
 /** Compare resolved paths case-insensitively on Windows without resolving links. */
 function samePath(left: string, right: string): boolean {
@@ -71,8 +73,39 @@ export function makeTestTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(testTempRoot(), prefix));
 }
 
+/** Create a short physical repo root for POSIX UDS fixtures without leaving AI/work. */
+export function makeSocketTestRepoRoot(): string {
+  if (process.platform === "win32") return makeTestTempDir("kaizen-ext-");
+  const workRoot = path.join(path.resolve(process.cwd(), ".."), "AI", "work");
+  fs.mkdirSync(workRoot, { recursive: true });
+  assertPlainDirectory(workRoot);
+  const candidate = fs.mkdtempSync(path.join(workRoot, "k"));
+  try {
+    if (!isDescendant(workRoot, candidate)) throw new Error(`socket fixture escaped AI/work: ${candidate}`);
+    assertPlainDirectory(candidate);
+    const socketPath = path.join(candidate, "AI", "work", "orchestration", "runtime", "control.sock");
+    if (Buffer.byteLength(socketPath, "utf-8") > MAX_POSIX_SOCKET_PATH_BYTES) {
+      throw new Error(`socket fixture path exceeds the portable POSIX UDS limit: ${socketPath}`);
+    }
+  } catch (error) {
+    fs.rmSync(candidate, { recursive: true, force: true });
+    throw error;
+  }
+  ownedSocketRoots.add(candidate);
+  return candidate;
+}
+
 /** Remove only an auto-owned root that remains a physical directory. */
 process.once("exit", () => {
+  for (const candidate of ownedSocketRoots) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      assertPlainDirectory(candidate);
+      fs.rmSync(candidate, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    } catch {
+      // Exit cleanup is best-effort; never turn a filesystem race into a noisy test-process failure.
+    }
+  }
   if (!ownsRoot || !root || !fs.existsSync(root)) return;
   try {
     assertPlainDirectory(root);

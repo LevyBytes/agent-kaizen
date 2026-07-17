@@ -31,6 +31,12 @@ Then check the DB when work will create records:
 python kaizen.py K1 --json
 ```
 
+Load project-adaptive skill context for the current task and current agent host, and repeat this when the task intent materially changes:
+
+```powershell
+python kaizen.py SK7 --query "<current task intent>" --host "<codex|claude>" --json
+```
+
 Before major tasks, remind the user to compact context or start a continuation when useful.
 
 ## 3. Kaizen Harness
@@ -46,7 +52,7 @@ Common command families:
 - `K*` DB/core; `W*` tasks/plans/packets; `G*` GOTCHA; `L*` LEARNING/LEARNED.
 - `Q*` quality/evals/verification/proof (incl. `Q8` output-validate against record schemas); `A*` artifacts; `M*` migration.
 - `R*` reports; `S*` source locks; `I*` IRL Review; `X*` private policy context.
-- `E*` evidence ingestion (ingest-file/chunk/query/inspect); `T*` traces and eval scores; `O*` improvement lab; `Y*` generative runs (ComfyUI); `B*` model/embedding backends (Ollama, local PyTorch, embedding, reranking, and PII).
+- `E*` evidence ingestion (ingest-file/chunk/query/inspect); `T*` traces and eval scores; `O*` improvement lab; `Y*` generative runs (ComfyUI); `B*` model/embedding backends (Ollama, local PyTorch, embedding, reranking, and PII); `SK*` skills/context.
 
 Run `python kaizen.py --help` for approved operations, or `python kaizen.py K0 --query "<intent>"` to find the right operation from intent. Do not invent operation codes or flags.
 
@@ -74,24 +80,18 @@ Markdown files such as `evals/GOTCHA.md`, `evals/LEARNING.md`, and `evals/LEARNE
 
 ## 5. Skills
 
-Use skills when the task matches the trigger.
+Use the context returned by `SK7` when it matches the active task. `SK7` is read-only, requires the current host, returns full instructions only for a live hash-verified package with a correct selected-host surface and host policy `on`, and records no query telemetry.
 
-- PowerShell/native Windows commands -> `powershell-vsdevshell`.
-- Git -> `git`.
-- GitHub -> `github`.
-- CLI UX/argparse/help/output/errors -> `cli-design`.
-- Skill creation/review/validation -> `skill-drafting`.
-- Chrome extensions -> `chrome-extensions`.
-- Blender -> `blender`.
-- GIMP -> `gimp`.
-- Lumberyard/CryEngine-family -> `lumberyard`.
-- Turso/SQLite-compatible DB work -> `turso-db`.
+Use `SK8` when context is unavailable or stale. `SK1`-`SK5` inspect and manage packages, links, indexes, and supported host policy; `SK6` previews or applies a Turso context synchronization. Status and plan actions are read-only. Any `apply` or `restore` action requires explicit owner approval and a matching `plan_sha256`.
+
+Treat publication state, host policy, and surface validation as independent axes. A skill is `published` only when its configured Git remote validates as GitHub; otherwise it is `staged`. Claude project policy supports `on`, `name-only`, `user-invocable-only`, and `off`. Codex policy is currently audit-only/default-on because no supported project-local writer exists. A staged skill is not automatically disabled, and no `SK*` operation infers permission to publish, link, or enable a skill. Host-native discovery may still expose installed skills according to its own policy. Turso selects project-relevant context; it does not install packages, create links, publish repositories, or edit host settings.
 
 ## 6. Working Pattern
 
 - Scope before Adapt: inspect, research, and clarify acceptance criteria.
 - Keep changes bounded to the active request.
 - Prefer deterministic scripts for repetitive mechanics.
+- `python tests/run_tests.py` runs only the fast `core` lane. Run `--lane platform` after filesystem/process/installer/transport changes; run the affected module after subprocess/concurrency/timeout/integration changes, and use `--lane slow` only for an explicitly requested broad pass. `live` and `extension` are always explicit.
 - Verify with ground truth before synthesis-only review.
 - Installer/tooling steps must be idempotent: pre-flight validate (detect already-present, valid results) and skip their download/install work on a warm re-run; do work only when validation fails, then re-validate. See `setup/SETUP.md`.
 - Markdown/docs use Prettier settings `proseWrap: never` / `printWidth: 100` (config kept local, not shipped) — one clean line per paragraph/bullet, never hard-wrapped at a column; optionally `npx prettier --check <files>` if prettier is installed — a convenience, not a required gate.

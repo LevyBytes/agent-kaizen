@@ -13,7 +13,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 
 import { pipeName, runtimeDir } from "../../extension/src/protocol";
-import { makeTestTempDir } from "./tempRoot";
+import { makeSocketTestRepoRoot } from "./tempRoot";
 
 export const TOKEN = "test-token-123";
 export const WIN = process.platform === "win32";
@@ -31,7 +31,7 @@ export interface FakeDaemon {
 
 /** Create a temp repo root with a valid control.token so protocol.request authenticates. */
 export function fakeRepoRoot(): string {
-  const root = makeTestTempDir("kaizen-ext-");
+  const root = makeSocketTestRepoRoot();
   fs.mkdirSync(runtimeDir(root), { recursive: true });
   fs.writeFileSync(path.join(runtimeDir(root), "control.token"), TOKEN, "utf-8");
   return root;

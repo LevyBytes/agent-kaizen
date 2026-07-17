@@ -803,6 +803,8 @@ class _StoreCase(unittest.TestCase):
 
     def store(self, node_id: str, *, db_path: Path | None = None) -> FleetStore:
         s = FleetStore(db_path=db_path or (self.root / "fleet.db"), node={"node_id": node_id, "created_at": "2026-01-01T00:00:00+00:00"})
+        # This fixture owns only scratch fleet.db; watermark integration has separate isolated tests.
+        s._record_watermark = lambda _project_id, _epoch: None  # type: ignore[method-assign]
         self.addCleanup(s.close)
         return s
 

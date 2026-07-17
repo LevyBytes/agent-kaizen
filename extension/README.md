@@ -1,10 +1,12 @@
 # Kaizen Controller (VS Code extension)
 
+> Development status: the controller foundation remains in the repository for active development, but it is not release-ready or supported for public use. Its Node and VSIX tests are intentionally excluded from the public GitHub Actions gate until the owner promotes it.
+
 The controlling-harness UI for the Kaizen supervisor daemon: isolated per-tab conversations rendered as editor chat panels (opened from the sidebar, the status bar, or `Kaizen: Open Chat`), plus the sidebar's approvals, session timeline, fleet, attach, and orchestration views. The extension holds no authoritative transcript or policy state: control goes through the daemon's owner-only loopback channel, while durable events replay from the daemon after a renderer or extension-host reload.
 
-## Install
+## Developer install
 
-To use the extension, install it — there is no other supported way to run it.
+For local extension development only, install a package built from the current working tree.
 
 ```text
 cd extension

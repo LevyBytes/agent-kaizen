@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { assertAmbientTempIsPinned, makeTestTempDir, testTempRoot } from "./tempRoot";
+import { assertAmbientTempIsPinned, makeSocketTestRepoRoot, makeTestTempDir, testTempRoot } from "./tempRoot";
 
 test("test runner pins ambient temp variables to its guarded D-workspace root", () => {
   assertAmbientTempIsPinned();
@@ -11,6 +11,15 @@ test("test runner pins ambient temp variables to its guarded D-workspace root", 
   const child = makeTestTempDir("temp-root-proof-");
   assert.equal(path.dirname(child), root);
   fs.rmSync(child, { recursive: true, force: true });
+});
+
+test("POSIX daemon fixtures keep real control sockets beneath AI/work and within the portable UDS limit", { skip: process.platform === "win32" }, () => {
+  const socketRoot = makeSocketTestRepoRoot();
+  const repoRoot = path.resolve(process.cwd(), "..");
+  const workRoot = path.join(repoRoot, "AI", "work");
+  const socketPath = path.join(socketRoot, "AI", "work", "orchestration", "runtime", "control.sock");
+  assert.ok(path.relative(workRoot, socketRoot) && !path.relative(workRoot, socketRoot).startsWith(".."));
+  assert.ok(Buffer.byteLength(socketPath, "utf-8") <= 103, socketPath);
 });
 
 test("test entrypoint routes npm and every child beneath guarded AI/work scratch", () => {

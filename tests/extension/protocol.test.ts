@@ -3,8 +3,8 @@
  * ({op,args,token}\n -> one line -> close) on the real per-OS transport (named pipe on Windows, UDS on
  * POSIX). Proves the M8 exit-criteria client legs: token auth round-trip, approval round-trip wire
  * shape, DENIED_STALE_FENCE surfacing as a STRUCTURED payload (never a throw), the clean
- * daemon-unreachable state, the Windows TCP fallback, and the pipe-name parity vector against
- * loopback.py's workspace_hash. Windows-only fallback and timeout legs are skipped on non-Windows CI.
+ * daemon-unreachable state, the cross-platform TCP fallback, and the pipe-name parity vector against
+ * loopback.py's workspace_hash. The in-flight primary timeout leg runs on both transports.
  */
 
 import assert from "node:assert/strict";
@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 
-import { DaemonUnreachable, MAX_LINE_BYTES, pipeName, readToken, request, runtimeDir, workspaceHash } from "../../extension/src/protocol";
+import { DaemonUnreachable, MAX_LINE_BYTES, readToken, request, runtimeDir, workspaceHash } from "../../extension/src/protocol";
 import { fakeRepoRoot, listenPathFor, startFakeDaemon, TOKEN, WIN } from "./fakeDaemon";
 import { makeTestTempDir } from "./tempRoot";
 
@@ -139,7 +139,7 @@ test("a malformed daemon reply becomes a readable DaemonUnreachable", async () =
   }
 });
 
-test("windows TCP fallback via control.addr", { skip: !WIN }, async () => {
+test("TCP fallback via control.addr when the primary endpoint is absent", async () => {
   const tcpRoot = fakeRepoRoot(); // no pipe listener for THIS root -> falls back to control.addr
   const tcp = await startFakeDaemon(0, { ping: { status: "OK", pong: true } });
   const addr = tcp.server.address() as net.AddressInfo;
@@ -152,22 +152,31 @@ test("windows TCP fallback via control.addr", { skip: !WIN }, async () => {
   }
 });
 
-test("windows in-flight pipe timeout is one-shot and never replays the request over TCP", { skip: !WIN }, async () => {
+test("control.addr rejects non-loopback hosts and invalid ports before connecting", async () => {
+  const invalidRoot = fakeRepoRoot();
+  for (const address of ["localhost:1234", "192.0.2.1:1234", "127.0.0.1:0", "127.0.0.1:65536"]) {
+    fs.writeFileSync(path.join(runtimeDir(invalidRoot), "control.addr"), address, "utf-8");
+    await assert.rejects(request(invalidRoot, "status", {}, 100), (error: unknown) =>
+      error instanceof DaemonUnreachable && /malformed control\.addr/.test(error.message));
+  }
+});
+
+test("in-flight primary timeout is one-shot and never replays the request over TCP", async () => {
   const timeoutRoot = fakeRepoRoot();
-  let pipeRequests = 0;
-  const hangingPipe = net.createServer((connection) => {
+  let primaryRequests = 0;
+  const hangingPrimary = net.createServer((connection) => {
     let counted = false;
     connection.on("data", () => {
       if (!counted) {
         counted = true;
-        pipeRequests += 1;
+        primaryRequests += 1;
       }
       // Deliberately accept the authenticated request without replying: it is now in flight.
     });
   });
   await new Promise<void>((resolve, reject) => {
-    hangingPipe.once("error", reject);
-    hangingPipe.listen(pipeName(timeoutRoot), () => resolve());
+    hangingPrimary.once("error", reject);
+    hangingPrimary.listen(listenPathFor(timeoutRoot), () => resolve());
   });
   const tcp = await startFakeDaemon(0, { slow: { status: "OK", replayed: true } });
   const addr = tcp.server.address() as net.AddressInfo;
@@ -175,11 +184,11 @@ test("windows in-flight pipe timeout is one-shot and never replays the request o
   const started = Date.now();
   try {
     await assert.rejects(request(timeoutRoot, "slow", {}, 250), /loopback timeout/);
-    assert.equal(pipeRequests, 1);
+    assert.equal(primaryRequests, 1);
     assert.equal(tcp.requests.length, 0, "an in-flight request must never be duplicated on fallback TCP");
     assert.ok(Date.now() - started < 2_500, "one overall deadline must not become two full timeouts");
   } finally {
-    hangingPipe.close();
+    hangingPrimary.close();
     tcp.close();
   }
 });

@@ -25,3 +25,7 @@ Out of scope:
 
 - `.github/secret_scanning.yml` — GitHub secret scanning is enabled; it excludes only `tests/test_redaction.py`, which holds secret-*shaped* fixtures used to prove the redaction gate denies them.
 - `kaizen_components/redaction.py` — file and record write paths run through a redaction gate that denies secret-shaped strings before they land.
+
+## Skill-store trust boundary
+
+Treat the configured external skill store as trusted, operator-controlled instruction and code input. `SK7` can place a package's full `SKILL.md` prose into model context; containment, validation, live package hashes, a correct selected-host surface, and effective host policy `on` gate that return but cannot make untrusted instructions safe. Claude project policy has a supported four-state writer; Codex policy is currently audit-only/default-on because no supported project-local writer exists. A `published` label means only that a configured package Git remote validates as GitHub; `staged` means it does not. Publication state is neither a trust decision nor an activation decision, and a staged package is not automatically disabled. Skill inventory and context queries do not fetch or publish repositories, install links, change host policy, enable skills, or execute package scripts.

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 from . import TOOL_VERSION
@@ -168,9 +170,29 @@ ALIASES = {
     "D7": ["D7", "remote-dispatch"],
     "D8": ["D8", "fleet-digest"],
     "D9": ["D9", "reconcile"],
+    "SK1": ["SK1", "skill-inventory"],
+    "SK2": ["SK2", "skill-validate"],
+    "SK3": ["SK3", "skill-links"],
+    "SK4": ["SK4", "skill-index"],
+    "SK5": ["SK5", "skill-policy"],
+    "SK6": ["SK6", "skill-context-sync"],
+    "SK7": ["SK7", "skill-context-query"],
+    "SK8": ["SK8", "skill-context-status"],
 }
 
-ALIAS_TO_CODE = {alias.lower(): code for code, aliases in ALIASES.items() for alias in aliases}
+def _build_alias_map() -> dict[str, str]:
+    """Build the case-insensitive alias map and fail closed on collisions."""
+    mapping: dict[str, str] = {}
+    for code, aliases in ALIASES.items():
+        for alias in aliases:
+            key = alias.lower()
+            if key in mapping:
+                raise RuntimeError(f"operation alias {alias!r} is assigned to both {mapping[key]} and {code}")
+            mapping[key] = code
+    return mapping
+
+
+ALIAS_TO_CODE = _build_alias_map()
 
 # One-line purpose per op (kept byte-identical to the README command-index Purpose column —
 # a parity test enforces it) plus sparse intent keywords for K0 lookup where user phrasing
@@ -298,6 +320,14 @@ REGISTRY: dict[str, tuple[str, tuple[str, ...]]] = {
     "D7": ("Dispatch a run to a fleet node", ("fleet", "dispatch", "remote", "attach", "apply", "patch")),
     "D8": ("Generate the fleet digest", ("fleet", "digest", "nodes", "coordinator")),
     "D9": ("Reconcile after isolation or node loss", ("fleet", "reconcile", "offline", "iso", "orphan", "sweep")),
+    "SK1": ("Inventory installed skill packages and host surfaces", ("skills", "discover", "packages", "hosts")),
+    "SK2": ("Validate skill packages, hashes, links, and indexes", ("skills", "check", "integrity")),
+    "SK3": ("Inspect, plan, or reconcile skill links", ("skills", "junctions", "symlinks")),
+    "SK4": ("Inspect, plan, or rebuild skill indexes", ("skills", "catalog")),
+    "SK5": ("Inspect, plan, apply, or restore host skill policy", ("skills", "visibility", "invocation")),
+    "SK6": ("Plan or apply validated skill-context synchronization", ("skills", "context", "sync", "turso")),
+    "SK7": ("Query validated skill context for task intent", ("skills", "context", "load", "route", "retrieve")),
+    "SK8": ("Inspect skill-context freshness and validation state", ("skills", "context", "status", "stale")),
 }
 
 # Ready-to-adapt examples for the ops agents reach for most; everything else gets a generic form.
@@ -327,6 +357,9 @@ _K0_EXAMPLES = {
     "D8": 'python kaizen.py D8 --json  (needs KAIZEN_DIST_MODE=observe|active)',
     "D9": 'python kaizen.py D9 --action reconcile --summary "Reconcile after reconnect." --json  (needs KAIZEN_DIST_MODE=observe|active)',
     "B8": 'python kaizen.py B8 --action add --payload-json "{\\"base_url\\":\\"https://gb10.tail1234.ts.net/v1\\",\\"lanes\\":[\\"text\\"],\\"model\\":\\"qwen2.5\\"}" --json',
+    "SK6": "python kaizen.py SK6 --json",
+    "SK7": 'python kaizen.py SK7 --query "review this installer" --host codex --json',
+    "SK8": "python kaizen.py SK8 --json",
 }
 
 
@@ -386,7 +419,7 @@ Command families:
   K* DB/core | W* work/tasks/plans/packets | G* GOTCHA | L* LEARNING/LEARNED
   Q* quality/evals/verification/proof | M* migration | R* reports | S* sources
   I* IRL Review | A* artifacts | X* private context/policy | T* traces/scores/agent runs | E* evidence ingestion | O* improvement lab
-  Y* generative runs (ComfyUI) | B* model/embedding backends | C* sessions | D* fleet
+  Y* generative runs (ComfyUI) | B* model/embedding backends | C* sessions | D* fleet | SK* skills/context
 
 Use the code form or named alias. For example, K1 and db-check are identical.
 """
@@ -459,7 +492,13 @@ def build_parser() -> argparse.ArgumentParser:
     path_options = parser.add_mutually_exclusive_group()
     path_options.add_argument("--workflow-file", dest="path", help="ComfyUI prompt JSON path (Y1/Y8/Y9; alias of --path)")
     path_options.add_argument("--path", help="file or fixture path")
-    parser.add_argument("--action", help="Y6/Y7 subaction (Y6: status|provision|start|stop|doctor; Y7: doctor|bakeoff|run)")
+    parser.add_argument(
+        "--action",
+        help=(
+            "operation subaction (SK3-SK5: status|plan|apply; SK5 also restore; SK6: plan|apply; "
+            "Y6: status|provision|start|stop|doctor; Y7: doctor|bakeoff|run)"
+        ),
+    )
     parser.add_argument("--route", choices=["api", "mcp"], help="Y8: generation route (default api)")
     parser.add_argument("--candidate", help="Y7: MCP candidate slug")
     parser.add_argument("--seed", type=int, help="Y8/Y9: override every seed/noise_seed input in the workflow")
@@ -494,6 +533,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority", help="policy priority label")
     parser.add_argument("--query", help="query text")
     parser.add_argument("--limit", type=int, help="maximum records")
+    parser.add_argument("--store-root", dest="store_root", help="SK*: external skills-store root")
+    parser.add_argument(
+        "--host",
+        action="append",
+        choices=("codex", "claude", "both"),
+        help="SK*: host surface (SK7 requires exactly one of codex|claude; other SK* default both)",
+    )
+    parser.add_argument("--skill", action="append", help="SK*: skill name; repeatable (required for SK3 plan/apply)")
+    parser.add_argument("--confirm-plan", dest="confirm_plan", help="SK3-SK6: SHA-256 of the recomputed plan to apply")
+    parser.add_argument(
+        "--desired",
+        choices=("on", "name-only", "user-invocable-only", "off", "default"),
+        help="SK5: desired policy for every --skill",
+    )
+    parser.add_argument("--policy", action="append", help="SK5: desired SKILL=STATE mapping; repeatable")
     parser.add_argument("--threshold", type=float, help="O5: cosine similarity threshold for near-duplicate clustering")
     parser.add_argument(
         "--allow-external",
@@ -551,6 +605,254 @@ def canonical_operation(raw: str | None) -> str:
     return code
 
 
+def _require_skill_plan_confirmation(args: argparse.Namespace) -> str:
+    """Return a normalized plan hash or deny every skill mutation before its handler runs."""
+    value = str(getattr(args, "confirm_plan", "") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise KaizenDenied(
+            "DENIED_SKILL_CONFIRM_PLAN_REQUIRED",
+            {
+                "required_action": (
+                    "run the operation with --action plan, review the result, then rerun the mutating "
+                    "action with --confirm-plan PLAN_SHA256"
+                )
+            },
+            exit_code=2,
+        )
+    args.confirm_plan = value
+    return value
+
+
+def _skill_store_root(args: argparse.Namespace) -> Path:
+    """Resolve the explicit store flag, environment override, or DEVROOT sibling convention."""
+    raw = str(getattr(args, "store_root", "") or os.environ.get("KAIZEN_SKILLS_ROOT", "")).strip()
+    if raw:
+        candidate = Path(raw).expanduser()
+        return (candidate if candidate.is_absolute() else REPO_ROOT / candidate).resolve(strict=False)
+    devroot = str(os.environ.get("DEVROOT", "")).strip()
+    return (Path(devroot) if devroot else REPO_ROOT.parent).joinpath("SKILLS", "skills").resolve(strict=False)
+
+
+def _skill_hosts(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return stable host selections while keeping the no-flag default read-only and complete."""
+    public_hosts = tuple(getattr(args, "host", None) or ("both",))
+    expanded: list[str] = []
+    for host in public_hosts:
+        expanded.extend(("codex", "claude") if host == "both" else (host,))
+    return tuple(dict.fromkeys(expanded))
+
+
+def _skill_policy_desired(args: argparse.Namespace) -> dict[str, str]:
+    """Parse repeatable policy assignments and the one-state-for-selected-skills shorthand."""
+    allowed = {"on", "name-only", "user-invocable-only", "off", "default"}
+    desired: dict[str, str] = {}
+    for raw in getattr(args, "policy", None) or ():
+        name, separator, state = str(raw).partition("=")
+        name, state = name.strip(), state.strip().lower()
+        if not separator or not name or state not in allowed:
+            raise usage_denial(
+                f"invalid skill policy assignment {raw!r}",
+                required_action="pass --policy SKILL=STATE where STATE is on, name-only, user-invocable-only, off, or default",
+            )
+        if name in desired and desired[name] != state:
+            raise usage_denial(
+                f"conflicting desired policies for skill {name!r}",
+                required_action="provide exactly one desired state per skill",
+            )
+        desired[name] = state
+    shared_state = getattr(args, "desired", None)
+    if shared_state:
+        names = [str(name).strip() for name in (getattr(args, "skill", None) or ()) if str(name).strip()]
+        if not names:
+            raise usage_denial(
+                "--desired requires at least one --skill",
+                required_action="pair --desired STATE with one or more --skill NAME flags",
+            )
+        for name in names:
+            if name in desired and desired[name] != shared_state:
+                raise usage_denial(
+                    f"conflicting desired policies for skill {name!r}",
+                    required_action="use either --desired with --skill or --policy SKILL=STATE for each skill",
+                )
+            desired[name] = shared_state
+    return desired
+
+
+def _skill_management_dispatch(operation: str, args: argparse.Namespace) -> dict[str, Any]:
+    """Dispatch SK1-SK5 through the stdlib-only support facade with structured denials."""
+    from support_scripts.skill_management import (
+        SkillManagementError,
+        apply_index_plan,
+        apply_link_plan,
+        apply_policy_plan,
+        build_index_plan,
+        build_link_plan,
+        build_policy_plan,
+        build_policy_restore_plan,
+        discover_skills,
+        index_status,
+        link_status,
+        policy_status,
+        restore_policy,
+        validation_status,
+    )
+
+    project_root = REPO_ROOT
+    store_root = _skill_store_root(args)
+    hosts = _skill_hosts(args)
+    skill_names = tuple(getattr(args, "skill", None) or ()) or None
+
+    def ok(payload: dict[str, Any], action: str) -> dict[str, Any]:
+        return {"status": "OK", "action": action, **payload}
+
+    def codex_policy_audit() -> dict[str, Any]:
+        inventory = discover_skills(project_root, store_root, ("codex",))
+        return {
+            "supported": False,
+            "policy_mode": "audit-only",
+            "complete": inventory["complete"],
+            "scan_errors": inventory["scan_errors"],
+            "skills": [
+                {
+                    "name": row["name"],
+                    "valid": row["valid"],
+                    "skill_md_sha256": row["skill_md_sha256"],
+                    "package_sha256": row["package_sha256"],
+                    "surface": row["hosts"]["codex"],
+                }
+                for row in inventory["skills"]
+            ],
+            "advisory": "Codex has no reliable project-local explicit-only skill policy; surfaced packages are audited without changing host settings.",
+        }
+
+    try:
+        if operation == "SK1":
+            inventory = discover_skills(project_root, store_root, hosts)
+            if skill_names is not None:
+                requested = set(skill_names)
+                inventory["skills"] = [
+                    row
+                    for row in inventory["skills"]
+                    if str(row.get("name")) in requested or str(row.get("source_relpath")) in requested
+                ]
+            inventory["count"] = len(inventory["skills"])
+            return ok(inventory, "inventory")
+
+        if operation == "SK2":
+            validation = validation_status(project_root, store_root, hosts)
+            if skill_names is not None:
+                requested = set(skill_names)
+                packages = [
+                    row
+                    for row in validation["packages"]
+                    if str(row.get("name")) in requested or str(row.get("source_relpath")) in requested
+                ]
+                matched = {
+                    value
+                    for row in packages
+                    for value in (str(row.get("name")), str(row.get("source_relpath")))
+                    if value in requested
+                }
+                missing = sorted(requested - matched)
+                if missing:
+                    raise SkillManagementError("requested skill(s) not found in store: " + ", ".join(missing))
+                names = {str(row.get("name")) for row in packages}
+                validation["packages"] = packages
+                validation["package_errors"] = [
+                    row for row in validation["package_errors"] if str(row.get("name")) in names
+                ]
+                validation["link_conflicts"] = [
+                    row for row in validation["link_conflicts"] if str(row.get("name")) in names
+                ]
+                validation["valid"] = bool(validation["complete"]) and not any(
+                    validation[key]
+                    for key in ("scan_errors", "package_errors", "link_conflicts", "stale_indexes", "errors")
+                )
+            validation["store_root"] = str(store_root)
+            validation["count"] = len(validation["packages"])
+            return ok(validation, "validate")
+
+        action = str(getattr(args, "action", None) or "status").strip().lower()
+        args.action = action
+        if operation == "SK3":
+            if action == "status":
+                return ok(link_status(project_root, store_root, hosts, skill_names), action)
+            if action == "plan":
+                return ok(build_link_plan(project_root, store_root, hosts, skill_names), action)
+            if action == "apply":
+                confirmation = _require_skill_plan_confirmation(args)
+                return apply_link_plan(project_root, store_root, hosts, skill_names, confirm_plan=confirmation)
+            raise usage_denial("SK3 action must be status, plan, or apply")
+
+        if operation == "SK4":
+            if action == "status":
+                return ok(index_status(project_root, hosts), action)
+            if action == "plan":
+                return ok(build_index_plan(project_root, hosts), action)
+            if action == "apply":
+                confirmation = _require_skill_plan_confirmation(args)
+                return apply_index_plan(project_root, hosts, confirm_plan=confirmation)
+            raise usage_denial("SK4 action must be status, plan, or apply")
+
+        if operation == "SK5":
+            if action == "status":
+                if hosts == ("codex",):
+                    audit = codex_policy_audit()
+                    return ok(
+                        {
+                            "hosts": ["codex"],
+                            "supported": False,
+                            "policy_mode": "audit-only",
+                            "codex": audit,
+                        },
+                        action,
+                    )
+                status = policy_status(project_root)
+                status["hosts"] = list(hosts)
+                if "codex" in hosts:
+                    status["codex"] = codex_policy_audit()
+                return ok(status, action)
+            if "codex" in hosts:
+                raise KaizenDenied(
+                    "DENIED_SKILL_POLICY_HOST_UNSUPPORTED",
+                    {
+                        "host": "codex",
+                        "required_action": "Codex policy is audit-only; use SK5 --action status, or explicitly pass --host claude for a Claude policy plan/apply/restore",
+                    },
+                    exit_code=2,
+                )
+            if action == "plan" and getattr(args, "path", None):
+                return ok(build_policy_restore_plan(project_root, args.path), "restore-plan")
+            desired = _skill_policy_desired(args)
+            if action in {"plan", "apply"} and not desired:
+                raise usage_denial(
+                    "SK5 plan/apply requires a desired policy",
+                    required_action="pass --policy SKILL=STATE or pair --skill NAME with --desired STATE",
+                )
+            if action == "plan":
+                return ok(build_policy_plan(project_root, desired), action)
+            if action == "apply":
+                confirmation = _require_skill_plan_confirmation(args)
+                return apply_policy_plan(project_root, desired, confirm_plan=confirmation)
+            if action == "restore":
+                if not getattr(args, "path", None):
+                    raise usage_denial(
+                        "SK5 restore requires a rollback record",
+                        required_action="pass --path PATH from policy status and --confirm-plan PLAN_SHA256",
+                    )
+                confirmation = _require_skill_plan_confirmation(args)
+                return restore_policy(project_root, args.path, confirm_plan=confirmation)
+            raise usage_denial("SK5 action must be status, plan, apply, or restore")
+    except SkillManagementError as error:
+        raise KaizenDenied(
+            "DENIED_SKILL_MANAGEMENT",
+            {"message": str(error), "required_action": "inspect the read-only status or plan result, correct the reported state, and retry"},
+            exit_code=2,
+        ) from error
+
+    raise AssertionError(operation)
+
+
 def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     """Routes a parsed args namespace by canonical op code to its handler; raises usage_denial for recognized-but-unimplemented."""
     if args.version:
@@ -576,6 +878,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "OK", **db.export_manifest()}
     if operation == "K7":
         return db.purge_test_records()
+
+    if operation in {"SK1", "SK2", "SK3", "SK4", "SK5"}:
+        return _skill_management_dispatch(operation, args)
+
+    if operation in {"SK6", "SK7", "SK8"}:
+        from .skill_context import context_query, context_status, context_sync
+
+        if operation == "SK6":
+            args.action = str(getattr(args, "action", None) or "plan").lower()
+            if args.action == "apply":
+                _require_skill_plan_confirmation(args)
+            return context_sync(args)
+        if operation == "SK7":
+            return context_query(args)
+        return context_status(args)
 
     lifecycle_dispatch = {
         "W1": lambda: add_lifecycle_record("tasks", args),

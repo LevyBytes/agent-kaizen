@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import tempfile
@@ -82,6 +83,121 @@ class PipeExistsTest(unittest.TestCase):
 
 
 class LoopbackFairnessTest(unittest.TestCase):
+    @unittest.skipIf(loopback.IS_WINDOWS or not hasattr(socket, "AF_UNIX"), "POSIX UDS path limit")
+    def test_overlong_uds_path_falls_back_to_advertised_tcp(self) -> None:
+        scratch_root = Path(tempfile.mkdtemp(prefix="loopback-fallback-", dir=Path("AI/work")))
+        runtime = scratch_root / ("u" * 160)
+        runtime.mkdir()
+        self.assertGreater(len(os.fsencode(runtime / "control.sock")), 108)
+        server = loopback.LoopbackServer(
+            scratch_root,
+            runtime,
+            "token",
+            lambda request: {"status": "OK", "op": request.get("op")},
+        )
+        try:
+            server.start()
+            self.assertEqual(server.transport, "tcp")
+            self.assertFalse((runtime / "control.sock").exists())
+            self.assertTrue((runtime / "control.addr").is_file())
+            self.assertEqual(
+                loopback.send_request(
+                    scratch_root,
+                    runtime,
+                    {"op": "ping", "token": "token"},
+                    timeout=2.0,
+                ),
+                {"status": "OK", "op": "ping"},
+            )
+        finally:
+            server.stop()
+            shutil.rmtree(scratch_root, ignore_errors=True)
+
+    def test_failed_uds_bind_preserves_foreign_endpoint_and_refuses_tcp_fallback(self) -> None:
+        scratch_root = Path(tempfile.mkdtemp(prefix="loopback-foreign-", dir=Path("AI/work")))
+        runtime = scratch_root / "runtime"
+        runtime.mkdir()
+        socket_path = runtime / "control.sock"
+        server = loopback.LoopbackServer(scratch_root, runtime, "token", lambda request: request)
+        fake_sock = mock.Mock()
+
+        def fail_bind(_path: str) -> None:
+            socket_path.write_text("foreign", encoding="utf-8")
+            raise OSError("endpoint claimed before bind")
+
+        fake_sock.bind.side_effect = fail_bind
+        try:
+            with mock.patch.object(loopback, "IS_WINDOWS", False), \
+                 mock.patch.object(loopback.socket, "AF_UNIX", 1, create=True), \
+                 mock.patch.object(loopback.socket, "socket", return_value=fake_sock), \
+                 mock.patch.object(server, "_start_tcp") as start_tcp:
+                with self.assertRaisesRegex(OSError, "endpoint claimed"):
+                    server.start()
+            self.assertEqual(socket_path.read_text(encoding="utf-8"), "foreign")
+            fake_sock.close.assert_called_once_with()
+            start_tcp.assert_not_called()
+        finally:
+            server.stop()
+            shutil.rmtree(scratch_root, ignore_errors=True)
+
+    def test_control_address_rejects_non_loopback_hosts_and_invalid_ports(self) -> None:
+        scratch_root = Path(tempfile.mkdtemp(prefix="loopback-address-", dir=Path("AI/work")))
+        runtime = scratch_root / "runtime"
+        runtime.mkdir()
+        try:
+            with mock.patch.object(loopback, "IS_WINDOWS", False), \
+                 mock.patch.object(loopback, "_client_tcp") as client:
+                for address in ("localhost:1234", "192.0.2.1:1234", "127.0.0.1:0", "127.0.0.1:65536"):
+                    with self.subTest(address=address):
+                        (runtime / "control.addr").write_text(address, encoding="utf-8")
+                        with self.assertRaisesRegex(ConnectionError, "invalid loopback address file"):
+                            loopback.send_request(scratch_root, runtime, {"op": "ping", "token": "token"})
+                client.assert_not_called()
+        finally:
+            shutil.rmtree(scratch_root, ignore_errors=True)
+
+    def test_tcp_hardening_failure_closes_listener_removes_address_and_resets_state(self) -> None:
+        scratch_root = Path(tempfile.mkdtemp(prefix="loopback-tcp-hardening-", dir=Path("AI/work")))
+        runtime = scratch_root / "runtime"
+        runtime.mkdir()
+        server = loopback.LoopbackServer(scratch_root, runtime, "token", lambda request: request)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            with mock.patch.object(loopback.socket, "socket", return_value=listener), \
+                 mock.patch.object(loopback, "_harden_file", side_effect=OSError("hardening failed")):
+                with self.assertRaisesRegex(OSError, "hardening failed"):
+                    server._start_tcp()
+            self.assertEqual(listener.fileno(), -1)
+            self.assertFalse((runtime / "control.addr").exists())
+            self.assertIsNone(server._sock)
+            self.assertIsNone(server._addr_file)
+            self.assertIsNone(server.transport)
+            self.assertIsNone(server.address)
+        finally:
+            server.stop()
+            shutil.rmtree(scratch_root, ignore_errors=True)
+
+    def test_tcp_thread_start_failure_closes_listener_removes_address_and_resets_state(self) -> None:
+        scratch_root = Path(tempfile.mkdtemp(prefix="loopback-tcp-thread-", dir=Path("AI/work")))
+        runtime = scratch_root / "runtime"
+        runtime.mkdir()
+        server = loopback.LoopbackServer(scratch_root, runtime, "token", lambda request: request)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            with mock.patch.object(loopback.socket, "socket", return_value=listener), \
+                 mock.patch.object(server, "_spawn_accept_loop", side_effect=RuntimeError("thread failed")):
+                with self.assertRaisesRegex(RuntimeError, "thread failed"):
+                    server._start_tcp()
+            self.assertEqual(listener.fileno(), -1)
+            self.assertFalse((runtime / "control.addr").exists())
+            self.assertIsNone(server._sock)
+            self.assertIsNone(server._addr_file)
+            self.assertIsNone(server.transport)
+            self.assertIsNone(server.address)
+        finally:
+            server.stop()
+            shutil.rmtree(scratch_root, ignore_errors=True)
+
     def test_two_parked_long_polls_do_not_starve_control_request(self) -> None:
         scratch_root = Path(tempfile.mkdtemp(prefix="loopback-p0-", dir=Path("AI/work")))
         runtime = scratch_root / "AI" / "work" / "orchestration" / "runtime"

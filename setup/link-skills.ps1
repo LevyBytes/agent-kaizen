@@ -76,7 +76,7 @@ $steps = @(
     [pscustomobject]@{ Id='preflight'; Name='Resolve store paths and validate inputs' },
     [pscustomobject]@{ Id='store'; Name='Clone or update optional skills store' },
     [pscustomobject]@{ Id='links'; Name='Create .agents and .claude skill junctions' },
-    [pscustomobject]@{ Id='index'; Name='Regenerate skill index when skill-drafting is available' }
+    [pscustomobject]@{ Id='index'; Name='Preview skill index reconciliation when skill-drafting is available' }
 )
 Initialize-AkInstaller -Name 'Agent Kaizen skill linker' -RepoRoot $RepoRoot -DevRoot $resolvedDevRoot -Steps $steps -PlanOnly:($PlanOnly -or $ListSteps) -NoProgressHeader:$NoProgressHeader -NoNetwork:$NoNetwork -NoExternalActions:$NoExternalActions -NoUserEnvWrites:$NoUserEnvWrites -AssumeYes:$AssumeYes -NoInput:$NoInput -SelfTest:$SelfTest
 
@@ -160,14 +160,17 @@ try {
         Write-Host ("{0} eligible skill(s); {1} junction(s) created; {2} link failure(s)." -f $eligible, $created, $failed) -ForegroundColor Green
     }
 
-    Invoke-AkStep -Id 'index' -Name 'Regenerate skill index when skill-drafting is available' -ScriptBlock {
+    Invoke-AkStep -Id 'index' -Name 'Preview skill index reconciliation when skill-drafting is available' -ScriptBlock {
         $builder = Join-Path $skillsDir 'skill-drafting\scripts\skill_builder.py'
         if (-not (Test-Path -LiteralPath $builder)) {
             Write-Host 'INDEX.md not regenerated: skill-drafting\scripts\skill_builder.py not found in the store.' -ForegroundColor DarkGray
             return
         }
         $py = Resolve-AkPythonExe -PythonExe $PythonExe -DevRoot $resolvedDevRoot
-        Invoke-AkNative -Exe $py -Arguments @($builder,'index',(Join-Path $RepoRoot '.claude\skills'),'--mirror',(Join-Path $RepoRoot '.agents\skills')) -ActivityNote 'Regenerating skill index files from the linked skill store.'
+        $indexRoot = Join-Path $RepoRoot '.claude\skills'
+        $indexMirror = Join-Path $RepoRoot '.agents\skills'
+        Invoke-AkNative -Exe $py -Arguments @($builder,'index','plan',$indexRoot,'--mirror',$indexMirror) -ActivityNote 'Previewing the skill index reconciliation; this step does not write.'
+        Write-Host ("Apply only after reviewing the plan: {0} {1} index apply {2} --mirror {3} --confirm-plan PLAN_SHA256" -f $py, $builder, $indexRoot, $indexMirror) -ForegroundColor Yellow
     }
 } catch {
     Write-Host ''

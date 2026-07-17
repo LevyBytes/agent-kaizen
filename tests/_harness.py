@@ -2,7 +2,7 @@
 
 Every test runs the real CLI (``kaizen.py``) as a subprocess against an isolated data plane: ``KAIZEN_REPO_ROOT`` points at a fresh temporary directory, so tests never read or write the project's real ``AI/db``.
 
-Run ``tests/run_tests.py`` with the shared Kaizen virtual environment. Direct discovery uses ``python -m unittest discover -s tests``.
+Run ``tests/run_tests.py`` with the shared Kaizen virtual environment. The no-argument runner selects the fast core lane; raw unittest discovery bypasses lane safety and is never a default gate.
 """
 
 from __future__ import annotations

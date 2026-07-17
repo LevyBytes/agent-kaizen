@@ -17,8 +17,7 @@ from kaizen_components.db_schema import TEST_ROOT_TABLES  # noqa: E402
 
 def _insert_generic(conn, table: str, tag: str, is_test: int) -> str:
     """Insert a minimal valid row into `table` (satisfying every NOT-NULL-without-default column with a
-    placeholder) plus is_test. Returns the row id. SCHEMA v1 has no CHECK/FK constraints, so placeholders
-    are accepted -- this lets the test cover every table without per-table column knowledge."""
+    placeholder) plus is_test. Returns the row id; finite-vocabulary fields use their valid seed value."""
     names, vals = [], []
     row_id = f"{table}_{tag}"
     for _cid, name, ctype, notnull, dflt, pk in conn.execute(f"PRAGMA table_info({table})").fetchall():
@@ -31,6 +30,8 @@ def _insert_generic(conn, table: str, tag: str, is_test: int) -> str:
         upper = (ctype or "").upper()
         if name == "id":
             vals.append(row_id)
+        elif table == "skill_context_syncs" and name == "status":
+            vals.append("complete")
         elif name in ("created_at", "updated_at", "retrieved_at"):
             vals.append("2026-07-07T00:00:00+00:00")
         elif "INT" in upper:

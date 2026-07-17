@@ -27,6 +27,7 @@ import os
 import platform
 import threading
 import time
+from datetime import timedelta
 from typing import Any
 
 from .. import db
@@ -242,9 +243,10 @@ class FleetStore:
            the redaction pass-path: legit coord fields (MagicDNS/scope/sha/epoch) pass; a token or home
            path DENIES.
 
-        Then content_hash the row core, INSERT with a node-tagged coord_id, and COMMIT immediately
-        (append-only; a coord tx is never left open). source_event_id dupes are INSERT OR IGNORE
-        (idempotent replay) and reported ``{deduped: true}``."""
+        Inside the serialized transaction, derive ``created_at`` strictly after this node's persisted
+        maximum, then content_hash/sign the row core, INSERT with a node-tagged coord_id, and COMMIT
+        immediately. source_event_id dupes are INSERT OR IGNORE (idempotent replay) and reported
+        ``{deduped: true}``."""
         if event_kind not in COORD_EVENT_KIND_MARKERS or marker not in COORD_EVENT_KIND_MARKERS[event_kind]:
             raise KaizenDenied(
                 "DENIED_COORD_KIND_MARKER",
@@ -286,29 +288,38 @@ class FleetStore:
             redaction_fields.update(_payload_redaction_fields(payload))
         assert_redacted(redaction_fields)
 
-        created = _now()
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True) if isinstance(payload, dict) else None
-        content_hash = utc_text_hash(
-            {
-                "node_id": self.node_id,
-                "project_id": project_id,
-                "event_kind": event_kind,
-                "marker": marker,
-                "scope_key": scope_key,
-                "epoch": epoch,
-                "payload_json": payload_json,
-                "created_at": created,
-            }
-        )
         record_id = identity.coord_id("ce", self.node_id)
-        # M11 Ed25519 signing (plan §C.2): when THIS node carries a signing seed, sign the content_hash
-        # (utf-8 bytes) and store the hex signature in the existing sig column (hard-None before M11). An
-        # injected test node / a node with no minted seed produces sig=None -- a BYTE-IDENTICAL legacy
-        # append. Signature VERIFICATION of pulled events is M16 (not built here); this only ATTESTS
-        # locally-appended rows so a peer can later verify origin.
-        signature = self._sign_content_hash(content_hash)
 
         def op(conn: Any) -> dict[str, Any]:
+            created = _now()
+            latest_row = conn.execute(
+                "SELECT MAX(created_at) FROM coord_events WHERE node_id = ?",
+                (self.node_id,),
+            ).fetchone()
+            latest = latest_row[0] if latest_row else None
+            created_dt = _parse_iso(created)
+            latest_dt = _parse_iso(latest)
+            if created_dt is None or (latest is not None and latest_dt is None):
+                raise AssertionError("coord event created_at must be a valid ISO datetime")
+            if latest_dt is not None and created_dt <= latest_dt:
+                created = (latest_dt + timedelta(microseconds=1)).isoformat()
+
+            content_hash = utc_text_hash(
+                {
+                    "node_id": self.node_id,
+                    "project_id": project_id,
+                    "event_kind": event_kind,
+                    "marker": marker,
+                    "scope_key": scope_key,
+                    "epoch": epoch,
+                    "payload_json": payload_json,
+                    "created_at": created,
+                }
+            )
+            # M11 Ed25519 signing (plan §C.2): sign only after the transaction derives the persisted
+            # monotonic timestamp because created_at is part of the attested content hash.
+            signature = self._sign_content_hash(content_hash)
             conn.execute(
                 "INSERT OR IGNORE INTO coord_events "
                 "(id, created_at, node_id, project_id, event_kind, marker, scope_key, epoch, "

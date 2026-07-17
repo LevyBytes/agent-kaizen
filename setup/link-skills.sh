@@ -52,7 +52,7 @@ ak_init "Agent Kaizen skill linker" "$REPO_ROOT" "$DEVROOT_RESOLVED" \
   "$(ak_step_obj preflight 'Resolve store paths and validate inputs')" \
   "$(ak_step_obj store 'Clone or update optional skills store')" \
   "$(ak_step_obj links 'Create .agents and .claude skill links')" \
-  "$(ak_step_obj index 'Regenerate skill index when skill-drafting is available')"
+  "$(ak_step_obj index 'Preview skill index reconciliation when skill-drafting is available')"
 
 if [ "$AK_PLAN_ONLY" -eq 1 ]; then
   ak_show_plan
@@ -125,10 +125,11 @@ step_index() {
   local PY
   PY="$(ak_resolve_python "$PYTHON_EXE" "$DEVROOT_RESOLVED")"
   [ -n "$PY" ] || ak_die "python not found; run the core installer first or pass --python-exe"
-  ak_run --note "Regenerating skill index files from the linked skill store." -- "$PY" "$BUILDER" index "$REPO_ROOT/.claude/skills" --mirror "$REPO_ROOT/.agents/skills"
+  ak_run --note "Previewing skill index reconciliation; this step does not write." -- "$PY" "$BUILDER" index plan "$REPO_ROOT/.claude/skills" --mirror "$REPO_ROOT/.agents/skills"
+  printf 'Apply only after reviewing the plan: %s %s index apply %s --mirror %s --confirm-plan PLAN_SHA256\n' "$PY" "$BUILDER" "$REPO_ROOT/.claude/skills" "$REPO_ROOT/.agents/skills"
 }
 
 ak_run_step preflight 'Resolve store paths and validate inputs' step_preflight
 ak_run_step store 'Clone or update optional skills store' step_store
 ak_run_step links 'Create .agents and .claude skill links' step_links
-ak_run_step index 'Regenerate skill index when skill-drafting is available' step_index
+ak_run_step index 'Preview skill index reconciliation when skill-drafting is available' step_index

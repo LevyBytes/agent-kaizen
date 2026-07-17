@@ -464,7 +464,7 @@ class WorkspacePathAuthority:
     def _bind_posix_root(self) -> int:
         if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
             raise WorkspacePathError("POSIX no-follow directory handles are unavailable")
-        required_dir_fd = (os.open, os.stat, os.unlink, os.link, os.replace, os.mkdir)
+        required_dir_fd = (os.open, os.stat, os.unlink, os.link, os.rename, os.mkdir)
         if any(function not in os.supports_dir_fd for function in required_dir_fd) \
                 or os.stat not in os.supports_follow_symlinks \
                 or os.link not in os.supports_follow_symlinks:

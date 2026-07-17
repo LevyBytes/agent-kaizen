@@ -950,6 +950,44 @@ class SingleInstanceTest(unittest.TestCase):
         self.root.rename(moved)
         moved.rename(self.root)
 
+    def test_lock_conflict_with_unsafe_pidfile_is_a_locked_single_instance_denial(self) -> None:
+        supervisor = supervisor_module.Supervisor(self.root)
+        try:
+            with mock.patch.object(
+                supervisor._ownership_registry.authority,
+                "acquire_process_lock",
+                side_effect=WorkspacePathError("unsafe lock"),
+            ), mock.patch.object(
+                supervisor,
+                "_read_pidfile",
+                side_effect=WorkspacePathError("unsafe pidfile"),
+            ):
+                with self.assertRaises(supervisor_module.SingleInstanceError) as raised:
+                    supervisor._claim_single_instance()
+            self.assertEqual((raised.exception.pid, raised.exception.nonce), (0, "locked"))
+        finally:
+            supervisor.shutdown()
+
+    def test_acquired_lock_with_unsafe_pidfile_is_a_locked_single_instance_denial(self) -> None:
+        supervisor = supervisor_module.Supervisor(self.root)
+        instance_lock = mock.Mock()
+        try:
+            with mock.patch.object(
+                supervisor._ownership_registry.authority,
+                "acquire_process_lock",
+                return_value=instance_lock,
+            ), mock.patch.object(
+                supervisor,
+                "_read_pidfile",
+                side_effect=WorkspacePathError("unsafe pidfile"),
+            ):
+                with self.assertRaises(supervisor_module.SingleInstanceError) as raised:
+                    supervisor._claim_single_instance()
+            self.assertEqual((raised.exception.pid, raised.exception.nonce), (0, "locked"))
+            instance_lock.close.assert_called_once_with()
+        finally:
+            supervisor.shutdown()
+
     def test_constructor_failure_releases_root_authority(self) -> None:
         candidate = self.root / "constructor-failure"
         candidate.mkdir()

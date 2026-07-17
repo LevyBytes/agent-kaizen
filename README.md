@@ -135,11 +135,11 @@ Every agent host writes through one CLI into one database; the next session — 
 - Deterministic scripts that move repetitive mechanics out of the model context window.
 - A transcript-mining helper (`support_scripts/mine_transcripts.py`) that drafts GOTCHA candidates from your own agent session logs — read-only on transcripts, human-reviewed, and promoted only through the normal `G1` write gate.
 - A multi-turn supervisor conversation with durable event replay, immutable permission profiles, and exactly one successful finalization on explicit close.
-- A zero-runtime-dependency VS Code controller with editor-tab conversations, durable daemon replay, governed tools, and an isolated Test Extension acceptance surface.
+- An in-tree, zero-runtime-dependency VS Code controller development foundation with editor-tab conversations, durable daemon replay, governed tools, and an isolated Test Extension acceptance surface; it is not release-ready for public use.
 
 ## Harness Daemon And VS Code Controller
 
-The optional controller UI is in [`extension/`](extension/README.md). Each editor-tab conversation has its own controller while the daemon remains authoritative for transcript and policy state. Closing a renderer does not stop its daemon run, and reopening receives a complete snapshot rebuilt from durable events. The sidebar remains the approvals, sessions/timeline, and fleet/engines navigator rather than a second chat surface.
+The controller development foundation is in [`extension/`](extension/README.md). It remains under active development, is not release-ready for public use, and is intentionally excluded from the public GitHub Actions gate. Each editor-tab conversation has its own controller while the daemon remains authoritative for transcript and policy state. Closing a renderer does not stop its daemon run, and reopening receives a complete snapshot rebuilt from durable events. The sidebar remains the approvals, sessions/timeline, and fleet/engines navigator rather than a second chat surface.
 
 The conversation lifecycle is deliberately longer than one model turn:
 
@@ -350,7 +350,7 @@ npx prettier --write  path/to/file.md   # apply formatting
 
 ## Testing
 
-The harness ships with a standard-library `unittest` suite under [`tests/`](tests/). Each test runs the CLI against a throwaway database (an isolated `KAIZEN_REPO_ROOT` temp directory), so it never reads or writes your real `AI/db/`. The suite includes a conformance matrix (`test_op_coverage.py`) that fails if any CLI operation lacks a test, a parity suite that fails if the README command table drifts from the CLI alias map, and a doc-examples runner that executes every command example in this README against a scratch database. Run the canonical scratch-pinning wrapper with the shared Kaizen venv:
+The harness ships with a standard-library `unittest` suite under [`tests/`](tests/). Each test runs against isolated scratch beneath `AI/work`, so it never reads or writes your real `AI/db/`. The no-argument runner is the fast deterministic `core` lane; expensive subprocess, concurrency, timeout, benchmark, integration, provider/live, and unreleased-extension coverage requires an explicit lane or targeted module. Run the canonical scratch-pinning wrapper with the shared Kaizen venv:
 
 ```powershell
 & "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py
@@ -360,7 +360,7 @@ The harness ships with a standard-library `unittest` suite under [`tests/`](test
 "$DEVROOT/Python/venvs/kaizen/bin/python" tests/run_tests.py
 ```
 
-See [`tests/README.md`](tests/README.md) for what each module covers.
+Use `tests/run_tests.py --list-lanes` to inspect ownership. Run `--lane platform` after filesystem/process/installer/transport changes, the affected slow module after subprocess/concurrency/timeout/integration changes, and `--lane slow` only for an explicitly requested broad slow pass. See [`tests/README.md`](tests/README.md) for commands and module coverage.
 
 ## Benchmarks
 
@@ -590,6 +590,14 @@ Short codes and named aliases are equivalent. Short codes are compact for agents
 | `D7`  | `remote-dispatch`          | Dispatch a run to a fleet node         |
 | `D8`  | `fleet-digest`             | Generate the fleet digest              |
 | `D9`  | `reconcile`                | Reconcile after isolation or node loss |
+| `SK1` | `skill-inventory`          | Inventory installed skill packages and host surfaces |
+| `SK2` | `skill-validate`           | Validate skill packages, hashes, links, and indexes |
+| `SK3` | `skill-links`              | Inspect, plan, or reconcile skill links |
+| `SK4` | `skill-index`              | Inspect, plan, or rebuild skill indexes |
+| `SK5` | `skill-policy`             | Inspect, plan, apply, or restore host skill policy |
+| `SK6` | `skill-context-sync`       | Plan or apply validated skill-context synchronization |
+| `SK7` | `skill-context-query`      | Query validated skill context for task intent |
+| `SK8` | `skill-context-status`     | Inspect skill-context freshness and validation state |
 
 ### Operational Flags And File Safety
 
@@ -674,7 +682,19 @@ from kaizen_components.args import main  # import AFTER pinning the data-plane r
 
 ## Skills Store
 
-Skills are maintained outside this repo and surfaced through `.agents/skills` and `.claude/skills` junctions.
+Skills are maintained in an external store. `.agents/skills` and `.claude/skills` remain optional host-native surfaces, while the `SK*` command family provides project-scoped discovery, validation, reconciliation, policy, and Turso-backed context selection.
+
+At session start and whenever task intent materially changes, models query the project snapshot with `python kaizen.py SK7 --query "<current task intent>" --host "<codex|claude>" --json`. The explicit host prevents one host's policy or links from authorizing another. The query is read-only, records no telemetry, and returns full skill instructions only after the live `SKILL.md` and package hashes match the validated snapshot, the selected-host surface is correct, and that host's policy is `on`. Claude project policy may also be `name-only`, `user-invocable-only`, or `off`, which SK7 excludes with a reason; Codex policy is currently audit-only/default-on because no supported project-local writer exists. Missing and wrong surfaces are also excluded with a reason. Before bootstrap SK7 returns an explicit unavailable result; existing schema-v1 databases require `K1`, `K2` inspection, and an owner-approved `K1 --restamp-manifest` when this additive update is the only reported manifest drift. Missing, invalid, stale, and integrity-failed packages fail closed. `SK8` uses `current` only for snapshot, inventory, surface, and policy freshness and reports validation, publication, and policy health separately.
+
+| Axis | Values | Meaning |
+| --- | --- | --- |
+| Publication | `published`, `staged` | `published` means a configured package Git remote validates as GitHub; otherwise the package is `staged`. This classification uses local configuration and does not publish or fetch anything. |
+| Host policy | Claude: `on`, `name-only`, `user-invocable-only`, `off`; Codex: audit-only/default-on | Controls automatic context eligibility. The four-state project-local writer currently exists only for Claude; only effective `on` is eligible for automatic full-context return through `SK7`. |
+| Host surface | `correct` or a portable failure state | Validates the selected host's link independently of publication and policy; examples include `missing`, `dangling_link`, `wrong_target`, and `real_directory`. |
+
+A staged package is not automatically disabled. It may remain locally usable when its package is valid and current, its selected-host surface is correct, and host policy permits it. No inventory, synchronization, query, or status operation automatically publishes a repository, creates a link, or enables a skill.
+
+Python tooling remains authoritative for packages, Git-remote classification, links, indexes, and host policy. Turso stores portable routing metadata, validation observations, synchronization history, and lifecycle events; it does not publish repositories, install packages, create links, or change host settings. Every apply operation recomputes its plan and requires the matching `plan_sha256` through `--confirm-plan`.
 
 Edit the canonical skill store, not a duplicate mirror. Every skill should have an `evals/` surface for command stubs and behavioral eval fixtures.
 
@@ -709,7 +729,7 @@ Two rules hold no matter what you enable: skip every backend and the determinist
 
 **Where does my data live?** Project records default to `AI/db/` inside the repo. Explicitly configured backends, vendor agents, fleet sync/control, and Git remotes can transmit operation-specific data to services or endpoints you select; that data then follows the selected service's policy.
 
-**Is it Windows-only?** No. The project is developed on Windows 11 Pro with VS Code, and the portable core runs on macOS and Linux; CI runs the full test suite on both Windows and Linux.
+**Is it Windows-only?** No. The project is developed on Windows 11 Pro with VS Code, and the portable core runs on macOS and Linux. Required CI runs the portable core once on Ubuntu and bounded platform contracts on Windows and Ubuntu; slow, live/provider, and extension lanes are explicit rather than default CI work.
 
 ## Public Repository Safety
 

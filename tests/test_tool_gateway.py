@@ -266,6 +266,7 @@ class ToolGatewayTest(unittest.TestCase):
             "OPENAI_API_KEY": "openai-tool-gateway-secret",
             "ANTHROPIC_API_KEY": "anthropic-tool-gateway-secret",
             "KAIZEN_TEST_SECRET": "ambient-tool-gateway-secret",
+            "LC_CTYPE": "ambient-tool-gateway-locale",
         }
         probe = "import json,os; print(json.dumps(dict(os.environ), sort_keys=True))"
         with mock.patch.dict(os.environ, secrets, clear=False):
@@ -281,9 +282,18 @@ class ToolGatewayTest(unittest.TestCase):
             "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR",
             "PYTHONUTF8", "PYTHONIOENCODING",
         }
-        self.assertLessEqual({key.casefold() for key in observed}, {key.casefold() for key in allowed})
-        for key in secrets:
+        interpreter_added = {"LC_CTYPE"} if os.name == "posix" else set()
+        self.assertLessEqual(
+            {key.casefold() for key in observed},
+            {key.casefold() for key in allowed | interpreter_added},
+        )
+        for key in secrets.keys() - {"LC_CTYPE"}:
             self.assertNotIn(key, observed)
+        if os.name == "posix":
+            self.assertIn("LC_CTYPE", observed)
+            self.assertNotEqual(observed["LC_CTYPE"], secrets["LC_CTYPE"])
+        else:
+            self.assertNotIn("LC_CTYPE", observed)
         runtime = (self.root / "AI" / "work" / "orchestration" / "tool-runtime").resolve()
         for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR"):
             self.assertEqual(Path(observed[key]).resolve(), runtime)

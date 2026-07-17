@@ -136,6 +136,7 @@ Command families:
 - `O*` improvement lab
 - `Y*` generative runs (ComfyUI)
 - `B*` model/embedding backends (Ollama)
+- `SK*` skill inventory, validation, reconciliation, policy, and project context
 
 Use `--help` for the approved operation list. Short codes and named aliases are equivalent. Do not invent operation codes or flags during task work.
 
@@ -182,7 +183,7 @@ Existing-target proposal modify, delete, and rename operations use the verified 
 
 One driven conversation keeps one C1/T5 open across multiple turns. `session/turn` is idle-only, `session/close` is idle-only and writes the sole successful T8, and `kill` remains a separate explicit non-success path. The event pump remains attached while idle; `session/events --since 0` is the replay source after a UI reload.
 
-The VS Code extension under `extension/` provides one isolated `ConversationController` per editor chat tab and one shared session-list poll (owner design 2026-07-10: the sidebar keeps its three sections — Approvals, Sessions & Timeline, Fleet & Engines — and chat opens in the center like a document). Each controller persists only its active identifiers/profile hash. Webviews never own transcript or policy state, and disposing a renderer never closes the run. Build and test it with:
+The VS Code extension under `extension/` is an in-tree development foundation, not a release-ready public surface; its Node/VSIX lane is intentionally absent from public GitHub Actions. It provides one isolated `ConversationController` per editor chat tab and one shared session-list poll (owner design 2026-07-10: the sidebar keeps its three sections — Approvals, Sessions & Timeline, Fleet & Engines — and chat opens in the center like a document). Each controller persists only its active identifiers/profile hash. Webviews never own transcript or policy state, and disposing a renderer never closes the run. Developers can build and test it locally with:
 
 ```powershell
 cd extension
@@ -272,7 +273,30 @@ python kaizen.py X5 --json
 
 ## 8. Skills
 
-Skills live in the external skills store and are surfaced through `.agents/skills` and `.claude/skills`. The public repo ships with no skills; add your own store with `setup/link-skills.ps1` / `setup/link-skills.sh`. Use the host skill loader when a task matches a skill trigger. Edit the canonical skill store, not a copied mirror.
+Skills live in the external skills store. `.agents/skills` and `.claude/skills` remain optional host-native surfaces, but project routing no longer depends on a hard-coded list in `AGENTS.md` or `CLAUDE.md`. Edit the canonical skill store, not a copied mirror.
+
+Load relevant context at session start and whenever task intent materially changes:
+
+```powershell
+python kaizen.py SK7 --query "<current task intent>" --host "<codex|claude>" --json
+```
+
+`SK7` requires one explicit `codex` or `claude` host, searches the latest validated project snapshot, rechecks the live `SKILL.md` and whole-package hashes, and returns full instructions without writing telemetry only when the selected-host surface is correct and its policy is `on`. Claude project policy may also be `name-only`, `user-invocable-only`, or `off`, which SK7 excludes with a portable reason; Codex policy is currently audit-only/default-on because no supported project-local writer exists. Missing and wrong surfaces are also excluded with a portable reason. Before bootstrap SK7 returns an explicit unavailable result rather than forcing a write. For a fresh database, run `K1`; when upgrading an existing schema-v1 database, run `K1`, inspect `K2`, and use the owner-approved `K1 --restamp-manifest` only when `schema_ok` is true and `manifest_match` is false from this known additive update. Then run `SK6 --action plan` and apply only after reviewing that plan. Missing, invalid, stale, or integrity-failed packages remain unavailable. `SK8` uses `current` for snapshot, inventory, surface, and policy freshness and reports package validity, publication, and policy health separately. `SK6 --action apply` writes Turso only after the recomputed plan matches `--confirm-plan`.
+
+Publication, host policy, and surface validation are independent. A package is `published` only when a configured Git remote validates as GitHub and is otherwise `staged`; this local classification neither publishes nor fetches the repository. Claude project policy supports `on`, `name-only`, `user-invocable-only`, and `off`; Codex policy remains audit-only/default-on. Surface validation independently checks the selected host link. A staged package is not automatically disabled, and no management operation automatically publishes, links, or enables it.
+
+The management surface is explicit:
+
+- `SK1` inventories packages, local GitHub publication classification, and host surfaces without writing.
+- `SK2` validates package, link, index, and freshness state without writing.
+- `SK3` inspects, plans, or applies project link reconciliation.
+- `SK4` inspects, plans, or applies the surfaced-skill index.
+- `SK5` inspects Claude or Codex policy and plans, applies, or restores Claude project policy; Codex is audit-only.
+- `SK6` plans or applies the Turso skill-context snapshot.
+- `SK7` queries task-relevant context for one explicit host.
+- `SK8` reports DB-versus-live freshness separately from package and policy health.
+
+Status and plan actions emit data only. Filesystem, settings, and database mutations require an explicit `apply` or `restore` action, owner approval, and the matching `plan_sha256`. Turso stores routing metadata and validated observations; Python tooling remains authoritative for packages, Git-remote classification, links, indexes, and host settings.
 
 Skills and scripts can support all SAVMI layers:
 

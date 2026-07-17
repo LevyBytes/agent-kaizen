@@ -786,6 +786,66 @@ DDL = [
         content_hash TEXT
     )
     """,
+    # Validated skill-context snapshots (additive; SCHEMA_VERSION stays 1). Python skill-management
+    # code is authoritative for discovery, validation, links, indexes, and host policy. These tables
+    # retain only portable metadata, complete snapshot provenance, and reconciliation events; skill
+    # prose and machine-absolute paths remain on disk and are read only after a live hash check.
+    """
+    CREATE TABLE IF NOT EXISTS skill_context_syncs (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('complete')),
+        plan_hash TEXT NOT NULL,
+        inventory_hash TEXT NOT NULL,
+        skill_count INTEGER NOT NULL CHECK (skill_count >= 0),
+        surface_count INTEGER NOT NULL CHECK (surface_count >= 0),
+        hosts_json TEXT NOT NULL,
+        is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+        summary TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skill_contexts (
+        id TEXT PRIMARY KEY,
+        sync_id TEXT NOT NULL,
+        skill_name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        covers_json TEXT NOT NULL,
+        skill_md_relpath TEXT NOT NULL,
+        skill_sha256 TEXT NOT NULL,
+        package_sha256 TEXT NOT NULL,
+        validation_status TEXT NOT NULL CHECK (validation_status IN ('valid', 'invalid')),
+        validation_errors_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skill_context_surfaces (
+        id TEXT PRIMARY KEY,
+        context_id TEXT NOT NULL,
+        host TEXT NOT NULL CHECK (host IN ('codex', 'claude')),
+        surface_relpath TEXT NOT NULL,
+        path_kind TEXT NOT NULL CHECK (path_kind IN ('link', 'real_directory', 'missing')),
+        validation_status TEXT NOT NULL CHECK (
+            validation_status IN ('missing', 'correct', 'wrong_target', 'dangling_link', 'real_directory')
+        ),
+        content_hash TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS skill_context_events (
+        id TEXT PRIMARY KEY,
+        sync_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN ('added', 'updated', 'retired', 'snapshot_applied')),
+        skill_name TEXT,
+        summary TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+    )
+    """,
 ]
 
 
@@ -810,6 +870,8 @@ TEST_ROOT_TABLES: tuple[str, ...] = (
     "authority_rules",
     # v8 M13 backend registry endpoints (root; is_test via the ADDITIVE path so live-test rows purge).
     "backend_endpoints",
+    # Skill context snapshot root; contexts/surfaces/events purge through their owning sync.
+    "skill_context_syncs",
 )
 ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [(t, "is_test", _IS_TEST) for t in TEST_ROOT_TABLES]
 # v8 M9 fleet fence columns on kaizen.db root tables (NULL-default; applied via the ADDITIVE path so
@@ -851,6 +913,22 @@ ADDITIVE_COLUMNS += [
     ("agent_runs", "reasoning_effort", "TEXT"),
     ("agent_runs", "permission_mode", "TEXT"),
     ("agent_runs", "profile_hash", "TEXT"),
+]
+# Skill-context lifecycle dimensions remain schema-v1 additive metadata. Existing snapshot rows receive
+# NULL and therefore fail closed in SK7/SK8 integrity checks until a freshly confirmed SK6 apply writes
+# the finite values and recomputed content hashes.
+ADDITIVE_COLUMNS += [
+    (
+        "skill_contexts",
+        "publication_status",
+        "TEXT CHECK (publication_status IN ('published', 'staged'))",
+    ),
+    ("skill_contexts", "publication_reason", "TEXT"),
+    (
+        "skill_context_surfaces",
+        "policy_state",
+        "TEXT CHECK (policy_state IN ('on', 'name-only', 'user-invocable-only', 'off'))",
+    ),
 ]
 # v8 H2.1 additive indexes: applied alongside ADDITIVE_COLUMNS at connect, deliberately NOT in the
 # hashed INDEXES list (the FTS_INDEX_SQL precedent) -- folding them in would shift
@@ -926,6 +1004,12 @@ TEST_PURGE_SQL: list[str] = [
     "DELETE FROM authority_rules WHERE is_test = 1",
     # v8 M13 backend registry (standalone config root; no children).
     "DELETE FROM backend_endpoints WHERE is_test = 1",
+    # Skill context snapshot children first, then their flagged sync root.
+    "DELETE FROM skill_context_surfaces WHERE context_id IN "
+    "(SELECT id FROM skill_contexts WHERE sync_id IN (SELECT id FROM skill_context_syncs WHERE is_test = 1))",
+    "DELETE FROM skill_context_events WHERE sync_id IN (SELECT id FROM skill_context_syncs WHERE is_test = 1)",
+    "DELETE FROM skill_contexts WHERE sync_id IN (SELECT id FROM skill_context_syncs WHERE is_test = 1)",
+    "DELETE FROM skill_context_syncs WHERE is_test = 1",
 ]
 # Count query per root table so K7 can report what it removed (captured before the deletes run).
 TEST_COUNT_SQL: dict[str, str] = {t: f"SELECT COUNT(*) FROM {t} WHERE is_test = 1" for t in TEST_ROOT_TABLES}
@@ -981,6 +1065,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_authority_rules_verb ON authority_rules(verb)",
     # v8 M13 backend registry (resolve_endpoint orders enabled rows by priority).
     "CREATE INDEX IF NOT EXISTS idx_backend_endpoints_priority ON backend_endpoints(enabled, priority)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_context_sync_current ON skill_context_syncs(is_current) "
+    "WHERE is_current = 1",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_context_sync_name ON skill_contexts(sync_id, skill_name)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_contexts_sync ON skill_contexts(sync_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_context_surface_host ON skill_context_surfaces(context_id, host)",
+    "CREATE INDEX IF NOT EXISTS idx_skill_context_events_sync ON skill_context_events(sync_id)",
 ]
 
 
@@ -1134,6 +1224,9 @@ REFERENCES: list[tuple[str, str, str, str]] = [
     ("user_instructions", "session_id", "agent_sessions", "id"),
     ("goals", "session_id", "agent_sessions", "id"),
     ("approval_requests", "session_id", "agent_sessions", "id"),
+    ("skill_contexts", "sync_id", "skill_context_syncs", "id"),
+    ("skill_context_surfaces", "context_id", "skill_contexts", "id"),
+    ("skill_context_events", "sync_id", "skill_context_syncs", "id"),
 ]
 
 
@@ -1190,5 +1283,9 @@ def schema_manifest() -> dict[str, object]:
             "mode_profiles",
             "authority_rules",
             "backend_endpoints",
+            "skill_context_syncs",
+            "skill_contexts",
+            "skill_context_surfaces",
+            "skill_context_events",
         ],
     }

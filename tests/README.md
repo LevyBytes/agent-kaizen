@@ -12,6 +12,8 @@ Tests invoke `sys.executable`, so run the canonical wrapper with the shared Kaiz
 
 ## Run
 
+The no-argument default is the fast `core` lane. It contains deterministic unit, static, schema, and contract tests; it never includes the `slow`, `live`, or `extension` lanes.
+
 ```powershell
 # Windows
 & "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py
@@ -22,13 +24,41 @@ Tests invoke `sys.executable`, so run the canonical wrapper with the shared Kaiz
 "$DEVROOT/Python/venvs/kaizen/bin/python" tests/run_tests.py
 ```
 
+List lane ownership without creating test scratch:
+
+```powershell
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py --list-lanes
+```
+
+Run the bounded host-contract lane when changing filesystem, process, installer, or loopback behavior:
+
+```powershell
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py --lane platform
+```
+
+Subprocess-heavy, concurrency, timeout, benchmark, and integration tests are explicit because they dominate suite runtime. Run the affected module during development, and run the whole slow lane only when the change spans those surfaces or before a release candidate:
+
+```powershell
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py test_session_drive.WriterLeaseConcurrencyTest
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py --lane slow
+```
+
+Provider/live tests retain their own environment gates and never run implicitly. The canonical runner removes an ambient `KAIZEN_RUN_LIVE` unless `--lane live` is selected, including for raw unittest selectors. The unreleased extension foundation is local-only and also requires an explicit lane:
+
+```powershell
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py --lane live
+& "$env:DEVROOT\Python\venvs\kaizen\Scripts\python.exe" tests/run_tests.py --lane extension
+```
+
+GitHub pull requests and pushes run `core` once on Ubuntu and the bounded `platform` lane on Ubuntu and Windows. The `slow` lane is available only through a manual `workflow_dispatch` with `run_slow=true`; public CI does not run live/provider or extension tests.
+
 ## Dependency audit (CI parity)
 
 CI runs a second job, `audit`, that scans every pinned dependency set for known advisories; mirror it locally before pushing with `pipx run pip-audit --progress-spinner off -r requirements-kaizen.txt -r requirements-docs.txt -r requirements-pytorch.txt` — a clean audit run means the job will pass.
 
 ## Representative coverage map
 
-This curated map highlights major suites; it is not exhaustive. The authoritative inventory is every `test_*.py` file discovered by `tests/run_tests.py`.
+This curated map highlights major suites; it is not exhaustive. [`lane_manifest.py`](lane_manifest.py) is the authoritative lane inventory; every root `test_*.py` module must have exactly one owner, and the runner fails closed on an unclassified, overlapping, or missing module.
 
 - `test_op_coverage.py` — the conformance matrix: AST-scans the whole suite and fails if any CLI operation is not exercised by at least one test (`ALLOWED_UNTESTED` is empty by design).
 - `test_doc_examples.py` — executes every `kaizen.py` command example in `README.md`,

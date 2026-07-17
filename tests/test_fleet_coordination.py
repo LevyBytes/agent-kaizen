@@ -111,6 +111,33 @@ class _ScratchSubprocess(unittest.TestCase):
 
 
 class TwoReplicaConvergenceTest(_ScratchSubprocess):
+    def test_local_event_timestamps_advance_when_wall_clock_stalls_or_regresses(self):
+        out = self.plane(
+            "from kaizen_components.fleet import store as store_module\n"
+            "s = make_store()\n"
+            "times = iter([\n"
+            "  '2026-01-01T00:00:00.123456+00:00',\n"
+            "  '2026-01-01T00:00:00.123456+00:00',\n"
+            "  '2025-12-31T23:59:59.999999+00:00',\n"
+            "  '2027-01-01T00:00:00+00:00',\n"
+            "])\n"
+            "store_module._now = lambda: next(times)\n"
+            "returned = [\n"
+            "  s.append_coord_event('heartbeat', 'point', summary=f'event {i}')['created_at']\n"
+            "  for i in range(4)\n"
+            "]\n"
+            "out = {'returned': returned, 'persisted': [row['created_at'] for row in s.coord_events()]}\n"
+            "s.close()\n"
+        )
+        expected = [
+            "2026-01-01T00:00:00.123456+00:00",
+            "2026-01-01T00:00:00.123457+00:00",
+            "2026-01-01T00:00:00.123458+00:00",
+            "2027-01-01T00:00:00+00:00",
+        ]
+        self.assertEqual(out["returned"], expected)
+        self.assertEqual(out["persisted"], expected)
+
     def test_cross_replay_reduces_identically_on_both_replicas(self):
         second = Path(tempfile.mkdtemp(prefix="kaizen-coord-B-"))
         self.addCleanup(shutil.rmtree, second, ignore_errors=True)

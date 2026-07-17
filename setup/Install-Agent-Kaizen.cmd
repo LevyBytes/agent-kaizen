@@ -2658,18 +2658,21 @@ function Invoke-AkSkillsInto {
         }
         Write-Ok ("{0} skill(s) installed and linked into .agents\skills and .claude\skills." -f $linked)
 
-        # Regenerate the skill index only when something was newly cloned/linked (or the index is
-        # missing) -- Verify pillar: a warm re-run with no new skills skips this.
+        # Preview the skill index only when something was newly cloned/linked (or the index is
+        # missing). Applying the generated plan remains a separate owner-approved action.
         $builder = Join-Path $skillsDir 'skill-drafting\scripts\skill_builder.py'
         $indexMd = Join-Path $RepoPath '.claude\skills\INDEX.md'
         if ($changed -or -not (Test-Path -LiteralPath $indexMd)) {
             if ((Test-Path -LiteralPath $builder) -and $VenvPython -and (Test-Path -LiteralPath $VenvPython)) {
                 try {
-                    Invoke-Native -FilePath $VenvPython -ArgumentList @($builder, 'index', (Join-Path $RepoPath '.claude\skills'), '--mirror', (Join-Path $RepoPath '.agents\skills')) -WorkingDirectory $RepoPath -Note 'Regenerating skill index.' | Out-Null
-                } catch { Write-Warn "Skill index regeneration skipped: $($_.Exception.Message)" }
+                    $indexRoot = Join-Path $RepoPath '.claude\skills'
+                    $indexMirror = Join-Path $RepoPath '.agents\skills'
+                    Invoke-Native -FilePath $VenvPython -ArgumentList @($builder, 'index', 'plan', $indexRoot, '--mirror', $indexMirror) -WorkingDirectory $RepoPath -Note 'Previewing skill index reconciliation; this step does not write.'
+                    Write-Warn ("Apply only after reviewing the plan: {0} {1} index apply {2} --mirror {3} --confirm-plan PLAN_SHA256" -f $VenvPython, $builder, $indexRoot, $indexMirror)
+                } catch { Write-Warn "Skill index reconciliation preview skipped: $($_.Exception.Message)" }
             }
         } else {
-            Write-Info 'Skill index unchanged; skipping regeneration.'
+            Write-Info 'Skill index inputs unchanged; skipping reconciliation preview.'
         }
     } catch {
         Write-Warn "Skills step did not complete (optional; run setup/link-skills later): $($_.Exception.Message)"

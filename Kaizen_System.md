@@ -192,6 +192,16 @@ Skills and support scripts are cross-layer capabilities. They can support resear
 
 A skill should not be a horde of clowns filling your model context window car. It is a small trigger surface plus optional references, scripts, fixtures, and verification behavior that loads only when relevant or preferably only on demand.
 
+A project-adaptive context plane may index validated skill metadata and return relevant instructions for the current task. Keep the boundary strict: deterministic tooling discovers and validates packages and reconciles host surfaces; the data plane stores routing metadata, freshness observations, and lifecycle evidence. A context query must verify the live source hash before returning instructions, fail closed on stale or invalid packages, and remain read-only unless telemetry is separately approved.
+
+Keep three skill lifecycle axes independent:
+
+- Publication is `published` when a configured package Git remote validates as GitHub and `staged` otherwise. This is local metadata, not a network publication action or a trust decision.
+- Host policy controls automatic context eligibility; only `on` authorizes automatic full-context return for that host. The current implementation writes `on`, `name-only`, `user-invocable-only`, or `off` only for Claude project policy. Codex is audit-only/default-on because no supported project-local writer exists.
+- Surface validation reports `correct` or a portable failure state such as `missing`, `dangling_link`, `wrong_target`, or `real_directory` for the selected host link; it does not infer publication or policy.
+
+A staged package may remain locally usable when it is valid, hash-current, correctly surfaced, and allowed by host policy. Discovery and classification never auto-publish a repository, create a link, or enable a skill.
+
 Common runtime roles for skill scripts:
 
 - utility;

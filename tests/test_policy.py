@@ -234,7 +234,10 @@ class HardDenyTest(unittest.TestCase):
         claude = os.path.expanduser("~/.claude/settings.json")
         codex = os.path.expanduser("~/.codex/config.toml")
         eng = engine()  # default vendor paths = the two expanduser files
-        for target in (claude, codex, "\\\\?\\" + claude.replace("/", "\\")):
+        targets = [claude, codex]
+        if os.name == "nt":
+            targets.append("\\\\?\\" + claude.replace("/", "\\"))
+        for target in targets:
             d = eng.decide(act("file_write", targets=(target,)), 1)
             self.assertEqual(d.result, "deny", target)
             self.assertEqual(d.invariant_id, P.INV_VENDOR_CONFIG, target)
@@ -273,14 +276,23 @@ class ShippedProtectedFloorTest(unittest.TestCase):
             self.assertEqual(d.invariant_id, P.INV_PROTECTED_PATH, target)
 
     def test_startup_folder_write_denied(self):
-        # The per-user Startup folder is an auto-run vector; a write under it hard-denies via the floor.
         floor = P.shipped_protected_paths()
-        startup = next((p for p in floor if "startup" in p), None)
-        self.assertIsNotNone(startup, floor)
         eng = engine()
-        d = eng.decide(act("file_write", targets=(startup + "\\evil.lnk",)), 1)
-        self.assertEqual(d.result, "deny")
-        self.assertEqual(d.invariant_id, P.INV_PROTECTED_PATH)
+        if os.name == "nt":
+            # The per-user Startup folder is an auto-run vector; writes under it hard-deny.
+            startup = next((p for p in floor if "startup" in p), None)
+            self.assertIsNotNone(startup, floor)
+            d = eng.decide(act("file_write", targets=(startup + "\\evil.lnk",)), 1)
+            self.assertEqual(d.result, "deny")
+            self.assertEqual(d.invariant_id, P.INV_PROTECTED_PATH)
+        elif os.name == "posix":
+            # POSIX protects the deliberate shell-startup file floor, not a Windows Startup folder.
+            for name in (".bashrc", ".profile", ".zshrc", ".bash_profile", ".zprofile"):
+                target = P.canonicalize_path(str(Path.home() / name))
+                self.assertIn(target, floor)
+                d = eng.decide(act("file_write", targets=(target,)), 1)
+                self.assertEqual(d.result, "deny", target)
+                self.assertEqual(d.invariant_id, P.INV_PROTECTED_PATH, target)
 
     def test_scratch_temp_write_is_not_caught_by_shipped_floor(self):
         # A write under a %TEMP%-style scratch dir must NOT be a hard-deny (tests use scratch temp roots).

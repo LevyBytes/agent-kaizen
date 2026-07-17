@@ -649,8 +649,9 @@ PY
 
   local builder="$store/skill-drafting/scripts/skill_builder.py"
   if [ -f "$builder" ]; then
-    ak_run --note "Regenerating the skill index." -- "$py" "$builder" index "$repo/.claude/skills" --mirror "$repo/.agents/skills" \
-      || printf '  [warn] skill index regeneration skipped.\n' >&2
+    ak_run --note "Previewing skill index reconciliation; this step does not write." -- "$py" "$builder" index plan "$repo/.claude/skills" --mirror "$repo/.agents/skills" \
+      || printf '  [warn] skill index reconciliation preview skipped.\n' >&2
+    printf 'Apply only after reviewing the plan: %s %s index apply %s --mirror %s --confirm-plan PLAN_SHA256\n' "$py" "$builder" "$repo/.claude/skills" "$repo/.agents/skills"
   fi
 }
 

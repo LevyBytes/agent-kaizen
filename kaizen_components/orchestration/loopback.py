@@ -6,7 +6,8 @@ Per-OS, owner-only local IPC so the extension/CLI (M8/M14) can drive the daemon:
   owner-only security descriptor via stdlib ctypes (NO pywin32). If pipe creation
   fails, fall back to a loopback TCP listener plus an owner-only token file.
 - POSIX: a Unix domain socket at ``<runtime>/control.sock`` chmod 0600, with a
-  SO_PEERCRED uid check on every connection.
+  SO_PEERCRED uid check on every connection. If the workspace path cannot fit
+  in the platform's UDS address field, fall back to owner-only loopback TCP.
 
 Wire protocol = JSON-Lines: the client writes one ``{op, args, token, epoch}`` JSON
 object terminated by ``\n``; the server replies with one JSON object + ``\n``. Every
@@ -222,7 +223,17 @@ class LoopbackServer:
                 # Named pipe unavailable (rare) -> owner-only loopback TCP + token file.
                 self._start_tcp()
                 return
-        self._start_uds()
+        try:
+            self._start_uds()
+        except OSError:
+            # Fall back only when the failed UDS attempt left no endpoint to shadow TCP.
+            try:
+                (self.runtime_dir / "control.sock").lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise
+            self._start_tcp()
 
     def stop(self) -> None:
         """Set stop, nudge a pipe accept, join threads, close listeners, and unlink endpoint files."""
@@ -259,13 +270,24 @@ class LoopbackServer:
         path = self.runtime_dir / "control.sock"
         try:
             path.unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(str(path))
-        os.chmod(path, 0o600)
-        sock.listen(16)
-        sock.settimeout(0.5)
+        bound = False
+        try:
+            sock.bind(str(path))
+            bound = True
+            os.chmod(path, 0o600)
+            sock.listen(16)
+            sock.settimeout(0.5)
+        except OSError:
+            sock.close()
+            if bound:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
         self._sock = sock
         self._uds_path = path
         self.transport = "uds"
@@ -275,18 +297,37 @@ class LoopbackServer:
     def _start_tcp(self) -> None:
         """Start the loopback TCP fallback and publish its owner-only address file."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(16)
-        sock.settimeout(0.5)
-        host, port = sock.getsockname()
-        self._sock = sock
-        self.transport = "tcp"
-        self.address = f"{host}:{port}"
         addr_file = self.runtime_dir / "control.addr"
-        addr_file.write_text(self.address, encoding="utf-8")
-        _harden_file(addr_file)
-        self._addr_file = addr_file
-        self._spawn_accept_loop(self._accept_socket_loop)
+        addr_touched = False
+        try:
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(16)
+            sock.settimeout(0.5)
+            host, port = sock.getsockname()
+            address = f"{host}:{port}"
+            addr_touched = True
+            addr_file.write_text(address, encoding="utf-8")
+            _harden_file(addr_file)
+            self._sock = sock
+            self.transport = "tcp"
+            self.address = address
+            self._addr_file = addr_file
+            self._spawn_accept_loop(self._accept_socket_loop)
+        except BaseException:
+            try:
+                sock.close()
+            finally:
+                try:
+                    if addr_touched:
+                        addr_file.unlink()
+                except FileNotFoundError:
+                    pass
+                finally:
+                    self._sock = None
+                    self.transport = None
+                    self.address = None
+                    self._addr_file = None
+            raise
 
     def _start_pipe(self) -> None:
         """Start the Windows first-instance named-pipe listener with owner-only security."""
@@ -300,8 +341,8 @@ class LoopbackServer:
 
     def _spawn_accept_loop(self, target: Callable[[], None]) -> None:
         thread = threading.Thread(target=target, name="kaizen-loopback", daemon=True)
-        self._threads.append(thread)
         thread.start()
+        self._threads.append(thread)
 
     # --- socket (uds/tcp) accept + serve ----------------------------------
 
@@ -473,17 +514,29 @@ def send_request(
             return _client_pipe(name, payload, timeout)
         addr_file = runtime_dir / "control.addr"
         if addr_file.is_file():
-            try:
-                host, port = addr_file.read_text(encoding="utf-8").strip().rsplit(":", 1)
-                port_number = int(port)
-            except (OSError, ValueError) as error:
-                raise ConnectionError("invalid loopback address file") from error
+            host, port_number = _read_control_address(addr_file)
             return _client_tcp(host, port_number, payload, timeout)
         raise ConnectionError("no loopback transport (pipe/addr) present")
     sock_path = runtime_dir / "control.sock"
-    if not sock_path.exists():
-        raise ConnectionError("no loopback socket present")
-    return _client_uds(sock_path, payload, timeout)
+    if sock_path.exists():
+        return _client_uds(sock_path, payload, timeout)
+    addr_file = runtime_dir / "control.addr"
+    if addr_file.is_file():
+        host, port_number = _read_control_address(addr_file)
+        return _client_tcp(host, port_number, payload, timeout)
+    raise ConnectionError("no loopback transport (uds/addr) present")
+
+
+def _read_control_address(path: Path) -> tuple[str, int]:
+    """Read one exact loopback TCP address from the owner-only endpoint file."""
+    try:
+        host, port = path.read_text(encoding="utf-8").strip().rsplit(":", 1)
+        port_number = int(port)
+    except (OSError, ValueError) as error:
+        raise ConnectionError("invalid loopback address file") from error
+    if host != "127.0.0.1" or not 1 <= port_number <= 65_535:
+        raise ConnectionError("invalid loopback address file")
+    return host, port_number
 
 
 def _client_uds(path: Path, payload: bytes, timeout: float) -> dict[str, Any]:

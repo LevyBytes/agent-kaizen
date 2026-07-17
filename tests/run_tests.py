@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Run the Python 3.12+ suite with every artifact under AI/work; KAIZEN_TEST_TEMP_ROOT must be absolute and confined there."""
+"""Run explicit Python test lanes with every artifact confined beneath AI/work."""
 
 from __future__ import annotations
 
+import argparse
 import os
 import stat
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+from lane_manifest import LANE_DESCRIPTIONS, lane_modules
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -150,10 +155,56 @@ def _safe_cleanup(base: Path, candidate: Path) -> None:
     shutil.rmtree(candidate, onexc=_recover_readonly(candidate))
 
 
+def _lane_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run the fast core lane by default or an explicit bounded test lane.",
+        epilog="Targeted unittest selectors remain supported without --lane, for example: tests.test_schema.",
+    )
+    parser.add_argument(
+        "--lane",
+        action="append",
+        choices=tuple(LANE_DESCRIPTIONS),
+        help="explicit lane; repeat to combine lanes (slow/live/extension are never implicit)",
+    )
+    parser.add_argument("--list-lanes", action="store_true", help="list lane ownership and exit")
+    return parser
+
+
+def _resolve_test_selection(args: list[str]) -> tuple[list[str], str] | None:
+    parser = _lane_parser()
+    parsed, unittest_args = parser.parse_known_args(args)
+    if parsed.list_lanes:
+        if parsed.lane or unittest_args:
+            parser.error("--list-lanes cannot be combined with a lane or unittest arguments")
+        for name, description in LANE_DESCRIPTIONS.items():
+            print(f"{name:9} {len(lane_modules(name)):3} selectors  {description}")
+        return None
+    if parsed.lane:
+        if unittest_args:
+            parser.error("--lane cannot be combined with raw unittest arguments; run a target directly instead")
+        selected = sorted({module for name in parsed.lane for module in lane_modules(name)})
+        return selected, "+".join(dict.fromkeys(parsed.lane))
+    if unittest_args:
+        return unittest_args, "explicit unittest selection"
+    return list(lane_modules("core")), "core"
+
+
+def _child_environment(selection_name: str) -> dict[str, str]:
+    """Copy the host environment and honor live gates only for an explicit live lane."""
+    env = dict(os.environ)
+    if "live" not in selection_name.split("+"):
+        env.pop("KAIZEN_RUN_LIVE", None)
+    return env
+
+
 def main(argv: list[str] | None = None) -> int:
     if sys.version_info < (3, 12):
         raise RuntimeError("tests/run_tests.py requires Python 3.12+ for safe shutil.rmtree(onexc=...) cleanup")
     args = list(sys.argv[1:] if argv is None else argv)
+    selection = _resolve_test_selection(args)
+    if selection is None:
+        return 0
+    test_args, selection_name = selection
     configured = os.environ.get("KAIZEN_TEST_TEMP_ROOT", "").strip()
     if configured and not Path(configured).is_absolute():
         raise RuntimeError("KAIZEN_TEST_TEMP_ROOT must be absolute")
@@ -169,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     _create_physical_directory(pycache_base, "test pycache base")
     temp_root = _prepare_child(temp_base, f"python-suite-{os.getpid()}")
     pycache_root = _prepare_child(pycache_base, f"python-suite-{os.getpid()}")
-    env = dict(os.environ)
+    env = _child_environment(selection_name)
     env.update(
         {
             "KAIZEN_TEST_TEMP_ROOT": str(temp_root),
@@ -181,7 +232,8 @@ def main(argv: list[str] | None = None) -> int:
         }
     )
     command = [sys.executable, "-m", "unittest"]
-    command.extend(args or ["discover", "-s", str(TEST_ROOT)])
+    command.extend(test_args)
+    print(f"test selection: {selection_name} ({len(test_args)} selectors)", flush=True)
     try:
         return subprocess.run(command, cwd=REPO_ROOT, env=env, check=False).returncode
     finally:
